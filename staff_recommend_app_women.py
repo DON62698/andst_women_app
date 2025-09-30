@@ -4,9 +4,9 @@ from datetime import date
 import matplotlib.pyplot as plt
 
 st.set_page_config(
-    page_title="and st 女生組",
-    page_icon="icon.png",
-    layout="wide",
+    page_title='and st 女生組',
+    page_icon='icon.png',
+    layout='wide',
 )
 
 
@@ -60,18 +60,9 @@ from data_management import show_data_management
 # -----------------------------
 @st.cache_resource
 def _init_once():
-    """Try to init Google Sheets; fallback to local mode if secrets missing."""
-    try:
-        _ = st.secrets["gcp_service_account"]
-        from db_gsheets import init_db, init_target_table
-        init_db()
-        init_target_table()
-        st.session_state["gsheets_enabled"] = True
-        return True
-    except Exception:
-        st.session_state["gsheets_enabled"] = False
-        st.warning("Google Sheetsの設定が見つからないため、ローカルモードで起動します。設定後に再読み込みしてください。")
-        return False
+    init_db()
+    init_target_table()
+    return True
 
 @st.cache_data(ttl=60)
 def load_all_records_cached():
@@ -213,7 +204,7 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
 # -----------------------------
 # 版頭
 # -----------------------------
-st.title("and st 女生組 統計記録 Team Men's")
+st.title("and st 統計記録 Team Men's")
 
 tab1, tab2, tab_week, tab_test, tab3 = st.tabs(["APP推薦紀錄", "アンケート紀錄", "週目標・達成率", "テスト記録", "データ管理"])
 
@@ -246,7 +237,7 @@ def show_statistics(category: str, label: str):
             st.info("目標未設定")
     with colB:
         with st.popover("🎯 目標を設定/更新"):
-            new_target = st.number_input("今月目標", min_value=0, step=1, value=int(target))
+            new_target = st.number_input("今月目標", min_value=0, step=1, value=int(target), key=f"{key_prefix}_monthly_target")
             if st.button(f"保存（{label}）"):
                 try:
                     set_target(ym, "app" if category == "app" else "survey", int(new_target))
@@ -454,7 +445,7 @@ with tab1:
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
-    show_statistics("app", "APP")
+    show_statistics("app", "APP", key_ns="tab_app")
     render_refresh_button("refresh_app_tab")
 
 
@@ -497,7 +488,7 @@ with tab2:
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
-    show_statistics("survey", "アンケート")
+    show_statistics("survey", "アンケート", key_ns="tab_survey")
     render_refresh_button("refresh_survey_tab")
 
 
@@ -510,8 +501,7 @@ with tab2:
 with tab_week:
     st.subheader("週目標の設定")
     from datetime import date
-    # ISO 週（週の開始は月曜）
-    target_date = st.date_input("週の判定用の日付", value=date.today())
+    target_date = st.date_input("週の判定用の日付", value=date.today(), key="wk_pick")
     y, w, _ = target_date.isocalendar()
     st.write(f"ISO 週: **{y} 年 第 {w} 週**")
 
@@ -543,11 +533,10 @@ with tab_week:
 
     st.divider()
     st.subheader("当週の達成率")
-    # 既存のレコードから今週合計を集計（APP+アンケートを合算。必要に応じて調整）
     today = date.today()
     ty, tw, _ = today.isocalendar()
 
-    # 既存の DataFrame を利用
+    # 既存の DataFrame を利用（空でもOK）
     df_all = ensure_dataframe(st.session_state.get("data", []))
 
     actual = 0
@@ -580,7 +569,7 @@ with tab_test:
     c1, c2 = st.columns(2)
     with c1:
         rec_date = st.date_input("日付", value=date.today(), key="t_rec_date")
-        staff = st.text_input("スタッフ名", value="", placeholder="例：山田")
+        staff = st.text_input("スタッフ名", value="", placeholder="例：山田", key="t_staff")
     with c2:
         new_cnt = st.number_input("新規（App）", min_value=0, step=1, value=0, key="t_new")
         exist_cnt = st.number_input("既存（App）", min_value=0, step=1, value=0, key="t_exist")
