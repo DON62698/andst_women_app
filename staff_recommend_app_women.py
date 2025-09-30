@@ -445,7 +445,7 @@ with tab1:
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
-    show_statistics("app", "APP", key_ns="tab_app")
+    show_statistics("app", "APP")
     render_refresh_button("refresh_app_tab")
 
 
@@ -488,7 +488,7 @@ with tab2:
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
-    show_statistics("survey", "アンケート", key_ns="tab_survey")
+    show_statistics("survey", "アンケート")
     render_refresh_button("refresh_survey_tab")
 
 
