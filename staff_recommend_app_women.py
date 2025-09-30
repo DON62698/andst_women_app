@@ -206,7 +206,7 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
 # -----------------------------
 st.title("and st 統計記録 Team Men's")
 
-tab_reg, tab_app_ana, tab_survey_ana, tab_rate, tab_manage = st.tabs(["件数登録", "and st 分析", "アンケート分析", "達成率", "データ管理"])
+tab_reg, tab_app_ana, tab_survey_ana, tab_manage = st.tabs(["件数登録", "and st 分析", "アンケート分析", "データ管理"])
 
 # -----------------------------
 # 統計區塊（含 構成比 + スタッフ別 合計 + 週別合計 + 月別累計）
@@ -243,6 +243,93 @@ def show_statistics(category: str, label: str):
                     set_target(ym, "app" if category == "app" else "survey", int(new_target))
                     get_target_safe.clear()
                     st.success("保存しました。")
+
+    st.divider()
+    st.subheader("達成率（週 / 月）")
+
+    # データ
+    df_all = ensure_dataframe(st.session_state.get("data", []))
+    ym = current_year_month()
+
+    from datetime import date as _date
+    _today = _date.today()
+    _y, _w, _ = _today.isocalendar()
+
+    # 週目標（ローカル保存）
+    if "weekly_targets_app" not in st.session_state:
+        st.session_state.weekly_targets_app = {}
+    if "weekly_targets_survey" not in st.session_state:
+        st.session_state.weekly_targets_survey = {}
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### 週目標（今週）")
+        _t_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+        _t_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+        _t_app_w_new = st.number_input("and st（週）", min_value=0, step=1, value=_t_app_w, key=f"reg_wk_app_{_y}_{_w}")
+        _t_sur_w_new = st.number_input("アンケート（週）", min_value=0, step=1, value=_t_sur_w, key=f"reg_wk_survey_{_y}_{_w}")
+        if st.button("週目標を保存", key=f"reg_save_wk_{_y}_{_w}"):
+            st.session_state.weekly_targets_app[(_y, _w)] = int(_t_app_w_new)
+            st.session_state.weekly_targets_survey[(_y, _w)] = int(_t_sur_w_new)
+            st.success("今週の目標を保存しました。")
+
+    with colB:
+        st.markdown(f"#### 月目標（{ym}）")
+        try:
+            _t_app_m = int(get_target_safe(ym, "app"))
+            _t_sur_m = int(get_target_safe(ym, "survey"))
+        except Exception:
+            _t_app_m = 0; _t_sur_m = 0
+        _t_app_m_new = st.number_input("and st（月）", min_value=0, step=1, value=_t_app_m, key=f"reg_mon_app_{ym}")
+        _t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=_t_sur_m, key=f"reg_mon_survey_{ym}")
+        if st.button("月目標を保存", key=f"reg_save_mon_{ym}"):
+            try:
+                set_target(ym, "app", int(_t_app_m_new))
+                set_target(ym, "survey", int(_t_sur_m_new))
+                st.success("月目標を保存しました。")
+            except Exception as e:
+                st.error(f"月目標の保存に失敗しました: {e}")
+
+    # 実績集計
+    _week_app = _week_survey = 0
+    _month_app = _month_survey = 0
+    if df_all is not None and not df_all.empty:
+        def _is_this_week(dt):
+            y2, w2, _ = dt.isocalendar()
+            return (y2, w2) == (_y, _w)
+        _df_week = df_all[df_all["date"].apply(_is_this_week)]
+        _week_app = int(_df_week[_df_week["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _week_survey = int(_df_week[_df_week["type"] == "survey"]["count"].sum())
+
+        _df_m = month_filter(df_all, ym)
+        _month_app = int(_df_m[_df_m["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _month_survey = int(_df_m[_df_m["type"] == "survey"]["count"].sum())
+
+    _tgt_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+    _tgt_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+    try:
+        _tgt_app_m = int(get_target_safe(ym, "app"))
+        _tgt_sur_m = int(get_target_safe(ym, "survey"))
+    except Exception:
+        _tgt_app_m = 0; _tgt_sur_m = 0
+
+    def _pct(a, b): return (a / b * 100) if b > 0 else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("and st（週）実績", f"{_week_app} 件")
+    with c2: st.metric("and st（週）目標", f"{_tgt_app_w} 件")
+    with c3: st.metric("and st（月）実績", f"{_month_app} 件")
+    with c4: st.metric("and st（月）目標", f"{_tgt_app_m} 件")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5: st.metric("アンケート（週）実績", f"{_week_survey} 件")
+    with c6: st.metric("アンケート（週）目標", f"{_tgt_sur_w} 件")
+    with c7: st.metric("アンケート（月）実績", f"{_month_survey} 件")
+    with c8: st.metric("アンケート（月）目標", f"{_tgt_sur_m} 件")
+
+    st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
+    st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
+
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
@@ -442,61 +529,97 @@ with tab_reg:
                         st.session_state.data = load_all_records_cached()
                         st.session_state.names = names_from_records(st.session_state.data)
                         st.success("保存しました。")
+
+    st.divider()
+    st.subheader("達成率（週 / 月）")
+
+    # データ
+    df_all = ensure_dataframe(st.session_state.get("data", []))
+    ym = current_year_month()
+
+    from datetime import date as _date
+    _today = _date.today()
+    _y, _w, _ = _today.isocalendar()
+
+    # 週目標（ローカル保存）
+    if "weekly_targets_app" not in st.session_state:
+        st.session_state.weekly_targets_app = {}
+    if "weekly_targets_survey" not in st.session_state:
+        st.session_state.weekly_targets_survey = {}
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### 週目標（今週）")
+        _t_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+        _t_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+        _t_app_w_new = st.number_input("and st（週）", min_value=0, step=1, value=_t_app_w, key=f"reg_wk_app_{_y}_{_w}")
+        _t_sur_w_new = st.number_input("アンケート（週）", min_value=0, step=1, value=_t_sur_w, key=f"reg_wk_survey_{_y}_{_w}")
+        if st.button("週目標を保存", key=f"reg_save_wk_{_y}_{_w}"):
+            st.session_state.weekly_targets_app[(_y, _w)] = int(_t_app_w_new)
+            st.session_state.weekly_targets_survey[(_y, _w)] = int(_t_sur_w_new)
+            st.success("今週の目標を保存しました。")
+
+    with colB:
+        st.markdown(f"#### 月目標（{ym}）")
+        try:
+            _t_app_m = int(get_target_safe(ym, "app"))
+            _t_sur_m = int(get_target_safe(ym, "survey"))
+        except Exception:
+            _t_app_m = 0; _t_sur_m = 0
+        _t_app_m_new = st.number_input("and st（月）", min_value=0, step=1, value=_t_app_m, key=f"reg_mon_app_{ym}")
+        _t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=_t_sur_m, key=f"reg_mon_survey_{ym}")
+        if st.button("月目標を保存", key=f"reg_save_mon_{ym}"):
+            try:
+                set_target(ym, "app", int(_t_app_m_new))
+                set_target(ym, "survey", int(_t_sur_m_new))
+                st.success("月目標を保存しました。")
+            except Exception as e:
+                st.error(f"月目標の保存に失敗しました: {e}")
+
+    # 実績集計
+    _week_app = _week_survey = 0
+    _month_app = _month_survey = 0
+    if df_all is not None and not df_all.empty:
+        def _is_this_week(dt):
+            y2, w2, _ = dt.isocalendar()
+            return (y2, w2) == (_y, _w)
+        _df_week = df_all[df_all["date"].apply(_is_this_week)]
+        _week_app = int(_df_week[_df_week["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _week_survey = int(_df_week[_df_week["type"] == "survey"]["count"].sum())
+
+        _df_m = month_filter(df_all, ym)
+        _month_app = int(_df_m[_df_m["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _month_survey = int(_df_m[_df_m["type"] == "survey"]["count"].sum())
+
+    _tgt_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+    _tgt_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+    try:
+        _tgt_app_m = int(get_target_safe(ym, "app"))
+        _tgt_sur_m = int(get_target_safe(ym, "survey"))
+    except Exception:
+        _tgt_app_m = 0; _tgt_sur_m = 0
+
+    def _pct(a, b): return (a / b * 100) if b > 0 else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("and st（週）実績", f"{_week_app} 件")
+    with c2: st.metric("and st（週）目標", f"{_tgt_app_w} 件")
+    with c3: st.metric("and st（月）実績", f"{_month_app} 件")
+    with c4: st.metric("and st（月）目標", f"{_tgt_app_m} 件")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5: st.metric("アンケート（週）実績", f"{_week_survey} 件")
+    with c6: st.metric("アンケート（週）目標", f"{_tgt_sur_w} 件")
+    with c7: st.metric("アンケート（月）実績", f"{_month_survey} 件")
+    with c8: st.metric("アンケート（月）目標", f"{_tgt_sur_m} 件")
+
+    st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
+    st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
+
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
 
-# 旧フォームは無効化
-# -----------------------------
-# 表單：APP 推薦紀錄
-# -----------------------------
-# with tab1:
-    st.subheader("and st 会員登録")
-    with st.form("app_form"):
-        c1, c2, c3 = st.columns([2, 2, 1])
-        with c1:
-            existing_names = st.session_state.names
-            if existing_names:
-                name_select = st.selectbox("スタッフ名（選択）", options=existing_names, index=0, key="app_name_select")
-                st.caption("未登録の場合は下で新規入力")
-            else:
-                name_select = ""
-                st.info("登録済みの名前がありません。下で新規入力してください。")
-            name_new = st.text_input("スタッフ名（新規入力）", key="app_name_text").strip()
-            name = name_new or name_select
-        with c2:
-            d = st.date_input("日付", value=date.today())
-        with c3:
-            pass
-
-        coln1, coln2, coln3 = st.columns(3)
-        with coln1: new_cnt = st.number_input("新規（件）", min_value=0, step=1, value=0)
-        with coln2: exist_cnt = st.number_input("既存（件）", min_value=0, step=1, value=0)
-        with coln3: line_cnt = st.number_input("LINE（件）", min_value=0, step=1, value=0)
-
-        submitted = st.form_submit_button("保存")
-        if submitted:
-            if not name:
-                st.warning("名前を入力してください。")
-            else:
-                total_cnt = int(new_cnt) + int(exist_cnt) + int(line_cnt)
-                try:
-                    if total_cnt == 0:
-                        st.session_state.names = sorted(set(st.session_state.names) | {name})
-                        st.success("名前を登録しました。（データは追加していません）")
-                    else:
-                        if new_cnt > 0:   insert_or_update_record(ymd(d), name, "new",   int(new_cnt))
-                        if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist", int(exist_cnt))
-                        if line_cnt > 0:  insert_or_update_record(ymd(d), name, "line",  int(line_cnt))
-                        load_all_records_cached.clear()
-                        st.session_state.data = load_all_records_cached()
-                        st.session_state.names = names_from_records(st.session_state.data)
-                        st.success("保存しました。")
-                except Exception as e:
-                    st.error(f"保存失敗: {e}")
-
-    show_statistics("app", "APP")
-    render_refresh_button("refresh_app_tab")
-
+# 旧APPフォームは完全に削除しました（統合フォームへ移行済み）。
 
 # -----------------------------
 # 表單：アンケート（問卷取得件數）
@@ -534,6 +657,93 @@ with tab2:
                         st.session_state.data = load_all_records_cached()
                         st.session_state.names = names_from_records(st.session_state.data)
                         st.success("保存しました。")
+
+    st.divider()
+    st.subheader("達成率（週 / 月）")
+
+    # データ
+    df_all = ensure_dataframe(st.session_state.get("data", []))
+    ym = current_year_month()
+
+    from datetime import date as _date
+    _today = _date.today()
+    _y, _w, _ = _today.isocalendar()
+
+    # 週目標（ローカル保存）
+    if "weekly_targets_app" not in st.session_state:
+        st.session_state.weekly_targets_app = {}
+    if "weekly_targets_survey" not in st.session_state:
+        st.session_state.weekly_targets_survey = {}
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("#### 週目標（今週）")
+        _t_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+        _t_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+        _t_app_w_new = st.number_input("and st（週）", min_value=0, step=1, value=_t_app_w, key=f"reg_wk_app_{_y}_{_w}")
+        _t_sur_w_new = st.number_input("アンケート（週）", min_value=0, step=1, value=_t_sur_w, key=f"reg_wk_survey_{_y}_{_w}")
+        if st.button("週目標を保存", key=f"reg_save_wk_{_y}_{_w}"):
+            st.session_state.weekly_targets_app[(_y, _w)] = int(_t_app_w_new)
+            st.session_state.weekly_targets_survey[(_y, _w)] = int(_t_sur_w_new)
+            st.success("今週の目標を保存しました。")
+
+    with colB:
+        st.markdown(f"#### 月目標（{ym}）")
+        try:
+            _t_app_m = int(get_target_safe(ym, "app"))
+            _t_sur_m = int(get_target_safe(ym, "survey"))
+        except Exception:
+            _t_app_m = 0; _t_sur_m = 0
+        _t_app_m_new = st.number_input("and st（月）", min_value=0, step=1, value=_t_app_m, key=f"reg_mon_app_{ym}")
+        _t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=_t_sur_m, key=f"reg_mon_survey_{ym}")
+        if st.button("月目標を保存", key=f"reg_save_mon_{ym}"):
+            try:
+                set_target(ym, "app", int(_t_app_m_new))
+                set_target(ym, "survey", int(_t_sur_m_new))
+                st.success("月目標を保存しました。")
+            except Exception as e:
+                st.error(f"月目標の保存に失敗しました: {e}")
+
+    # 実績集計
+    _week_app = _week_survey = 0
+    _month_app = _month_survey = 0
+    if df_all is not None and not df_all.empty:
+        def _is_this_week(dt):
+            y2, w2, _ = dt.isocalendar()
+            return (y2, w2) == (_y, _w)
+        _df_week = df_all[df_all["date"].apply(_is_this_week)]
+        _week_app = int(_df_week[_df_week["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _week_survey = int(_df_week[_df_week["type"] == "survey"]["count"].sum())
+
+        _df_m = month_filter(df_all, ym)
+        _month_app = int(_df_m[_df_m["type"].isin(["new", "exist", "line"])]["count"].sum())
+        _month_survey = int(_df_m[_df_m["type"] == "survey"]["count"].sum())
+
+    _tgt_app_w = int(st.session_state.weekly_targets_app.get((_y, _w), 0))
+    _tgt_sur_w = int(st.session_state.weekly_targets_survey.get((_y, _w), 0))
+    try:
+        _tgt_app_m = int(get_target_safe(ym, "app"))
+        _tgt_sur_m = int(get_target_safe(ym, "survey"))
+    except Exception:
+        _tgt_app_m = 0; _tgt_sur_m = 0
+
+    def _pct(a, b): return (a / b * 100) if b > 0 else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("and st（週）実績", f"{_week_app} 件")
+    with c2: st.metric("and st（週）目標", f"{_tgt_app_w} 件")
+    with c3: st.metric("and st（月）実績", f"{_month_app} 件")
+    with c4: st.metric("and st（月）目標", f"{_tgt_app_m} 件")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5: st.metric("アンケート（週）実績", f"{_week_survey} 件")
+    with c6: st.metric("アンケート（週）目標", f"{_tgt_sur_w} 件")
+    with c7: st.metric("アンケート（月）実績", f"{_month_survey} 件")
+    with c8: st.metric("アンケート（月）目標", f"{_tgt_sur_m} 件")
+
+    st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
+    st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
+
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
