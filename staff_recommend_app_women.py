@@ -206,7 +206,7 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
 # -----------------------------
 st.title("and st 統計記録 Team Men's")
 
-tab1, tab2, tab_week, tab_test, tab3 = st.tabs(["APP推薦紀錄", "アンケート紀錄", "週目標・達成率", "テスト記録", "データ管理"])
+tab_reg, tab_app_ana, tab_survey_ana, tab_rate, tab_manage = st.tabs(["件数登録", "and st 分析", "アンケート分析", "達成率", "データ管理"])
 
 # -----------------------------
 # 統計區塊（含 構成比 + スタッフ別 合計 + 週別合計 + 月別累計）
@@ -398,9 +398,58 @@ def show_statistics(category: str, label: str):
 
 
 # -----------------------------
+# 件数登録（APP + アンケート）
+# -----------------------------
+with tab_reg:
+    st.subheader("件数登録（and st / アンケート）")
+    with st.form("unified_form"):
+        c1, c2, c3 = st.columns([2, 2, 1])
+        with c1:
+            existing_names = st.session_state.names
+            if existing_names:
+                name_select = st.selectbox("スタッフ名（選択）", options=existing_names, index=0, key="reg_name_select")
+                st.caption("未登録の場合は下で新規入力")
+            else:
+                name_select = ""
+                st.info("登録済みの名前がありません。下で新規入力してください。")
+            name_new = st.text_input("スタッフ名（新規入力）", key="reg_name_text").strip()
+            name = name_new or name_select
+        with c2:
+            d = st.date_input("日付", value=date.today(), key="reg_date")
+
+        # 件数入力（APP 3種 + アンケート）
+        new_cnt   = st.number_input("新規（and st）", min_value=0, step=1, value=0, key="reg_new")
+        exist_cnt = st.number_input("既存（and st）", min_value=0, step=1, value=0, key="reg_exist")
+        line_cnt  = st.number_input("LINE（and st）", min_value=0, step=1, value=0, key="reg_line")
+        survey_cnt= st.number_input("アンケート", min_value=0, step=1, value=0, key="reg_survey")
+
+        submitted = st.form_submit_button("保存")
+        if submitted:
+            if not name:
+                st.warning("名前を入力してください。")
+            else:
+                total = int(new_cnt) + int(exist_cnt) + int(line_cnt) + int(survey_cnt)
+                try:
+                    if total == 0:
+                        st.session_state.names = sorted(set(st.session_state.names) | {name})
+                        st.success("名前を登録しました。（データは追加していません）")
+                    else:
+                        if new_cnt   > 0: insert_or_update_record(ymd(d), name, "new",    int(new_cnt))
+                        if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist",  int(exist_cnt))
+                        if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
+                        if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+                        load_all_records_cached.clear()
+                        st.session_state.data = load_all_records_cached()
+                        st.session_state.names = names_from_records(st.session_state.data)
+                        st.success("保存しました。")
+                except Exception as e:
+                    st.error(f"保存に失敗しました: {e}")
+
+# 旧フォームは無効化
+# -----------------------------
 # 表單：APP 推薦紀錄
 # -----------------------------
-with tab1:
+# with tab1:
     st.subheader("and st 会員登録")
     with st.form("app_form"):
         c1, c2, c3 = st.columns([2, 2, 1])
@@ -498,7 +547,19 @@ with tab2:
 # -----------------------------
 # 週目標・達成率（ローカルメモリ）
 # -----------------------------
-with tab_week:
+# -----------------------------
+# and st 分析（APP）
+# -----------------------------
+with tab_app_ana:
+    show_statistics("app", "and st 分析")
+
+# -----------------------------
+# アンケート分析（SURVEY）
+# -----------------------------
+with tab_survey_ana:
+    show_statistics("survey", "アンケート分析")
+
+with tab_rate:
     st.subheader("週目標の設定")
     from datetime import date
     target_date = st.date_input("週の判定用の日付", value=date.today(), key="wk_pick")
@@ -560,50 +621,7 @@ with tab_week:
 # -----------------------------
 # テスト記録（ローカルメモリ）
 # -----------------------------
-with tab_test:
-    st.subheader("テスト記録（ローカル）")
-    if "test_records" not in st.session_state:
-        st.session_state.test_records = []  # {"date","staff","new","exist","line","survey"}
+# （テスト記録ページは不要のため削除）
 
-    from datetime import date
-    c1, c2 = st.columns(2)
-    with c1:
-        rec_date = st.date_input("日付", value=date.today(), key="t_rec_date")
-        staff = st.text_input("スタッフ名", value="", placeholder="例：山田", key="t_staff")
-    with c2:
-        new_cnt = st.number_input("新規（App）", min_value=0, step=1, value=0, key="t_new")
-        exist_cnt = st.number_input("既存（App）", min_value=0, step=1, value=0, key="t_exist")
-        line_cnt = st.number_input("LINE", min_value=0, step=1, value=0, key="t_line")
-        survey_cnt = st.number_input("アンケート", min_value=0, step=1, value=0, key="t_survey")
-
-    if st.button("➕ 追加", key="add_test_record"):
-        st.session_state.test_records.append({
-            "date": rec_date,
-            "staff": staff.strip(),
-            "new": int(new_cnt),
-            "exist": int(exist_cnt),
-            "line": int(line_cnt),
-            "survey": int(survey_cnt),
-        })
-        st.success("テスト記録を追加しました。")
-
-    if st.session_state.test_records:
-        import pandas as pd
-        df = pd.DataFrame([
-            {
-                "日付": r["date"],
-                "スタッフ": r["staff"],
-                "新規": r["new"],
-                "既存": r["exist"],
-                "LINE": r["line"],
-                "アンケート": r["survey"],
-                "合計": int(r["new"]) + int(r["exist"]) + int(r["line"]) + int(r["survey"]),
-                "ISO週": f"{r['date'].isocalendar()[0]}-{r['date'].isocalendar()[1]}",
-            }
-            for r in st.session_state.test_records
-        ])
-        st.dataframe(df, use_container_width=True)
-        st.caption("※ 表示確認用のローカルデータです（本番は既存データから集計）。")
-
-with tab3:
+with tab_manage:
     show_data_management()
