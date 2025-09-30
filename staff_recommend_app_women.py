@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 import matplotlib.pyplot as plt
-import streamlit as st
+
 st.set_page_config(
     page_title="and st 女生組",
     page_icon="icon.png",
@@ -60,9 +60,18 @@ from data_management import show_data_management
 # -----------------------------
 @st.cache_resource
 def _init_once():
-    init_db()
-    init_target_table()
-    return True
+    """Try to init Google Sheets; fallback to local mode if secrets missing."""
+    try:
+        _ = st.secrets["gcp_service_account"]
+        from db_gsheets import init_db, init_target_table
+        init_db()
+        init_target_table()
+        st.session_state["gsheets_enabled"] = True
+        return True
+    except Exception:
+        st.session_state["gsheets_enabled"] = False
+        st.warning("Google Sheetsの設定が見つからないため、ローカルモードで起動します。設定後に再読み込みしてください。")
+        return False
 
 @st.cache_data(ttl=60)
 def load_all_records_cached():
@@ -204,7 +213,7 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
 # -----------------------------
 # 版頭
 # -----------------------------
-st.title("and st 統計記録 Team Men's")
+st.title("and st 女生組 統計記録 Team Men's")
 
 tab1, tab2, tab_week, tab_test, tab3 = st.tabs(["APP推薦紀錄", "アンケート紀錄", "週目標・達成率", "テスト記録", "データ管理"])
 
@@ -491,15 +500,18 @@ with tab2:
     show_statistics("survey", "アンケート")
     render_refresh_button("refresh_survey_tab")
 
+
+# -----------------------------
+# データ管理
+# -----------------------------
 # -----------------------------
 # 週目標・達成率（ローカルメモリ）
 # -----------------------------
 with tab_week:
     st.subheader("週目標の設定")
     from datetime import date
-    # ISO週（週の判定は月曜はじまり）
-    iso_year, iso_week, _ = date.today().isocalendar()
-    target_date = st.date_input("週の判定用の日付を選択", value=date.today())
+    # ISO 週（週の開始は月曜）
+    target_date = st.date_input("週の判定用の日付", value=date.today())
     y, w, _ = target_date.isocalendar()
     st.write(f"ISO 週: **{y} 年 第 {w} 週**")
 
@@ -507,14 +519,14 @@ with tab_week:
         st.session_state.weekly_targets = {}  # {(year, week): target}
 
     current_target = int(st.session_state.weekly_targets.get((y, w), 0))
-    new_target = st.number_input("本週の目標（件）", min_value=0, step=1, value=current_target)
+    new_target = st.number_input("本週の目標（件）", min_value=0, step=1, value=current_target, key=f"weekly_target_input_{y}_{w}")
     cA, cB = st.columns(2)
     with cA:
-        if st.button("💾 保存／更新", key="save_week_target"):
+        if st.button("💾 保存／更新", key=f"save_week_target_{y}_{w}"):
             st.session_state.weekly_targets[(y, w)] = int(new_target)
             st.success(f"{y}年 第{w}週 の目標を {int(new_target)} 件に更新しました。")
     with cB:
-        if st.button("🗑️ クリア", key="clear_week_target"):
+        if st.button("🗑️ クリア", key=f"clear_week_target_{y}_{w}"):
             if (y, w) in st.session_state.weekly_targets:
                 del st.session_state.weekly_targets[(y, w)]
                 st.warning(f"{y}年 第{w}週 の目標をクリアしました。")
@@ -522,7 +534,7 @@ with tab_week:
                 st.info("この週の目標は未設定です。")
 
     st.divider()
-    st.markdown("#### 今まで設定された週目標")
+    st.markdown("#### 設定済みの週目標")
     if st.session_state.weekly_targets:
         for (yy, ww), tgt in sorted(st.session_state.weekly_targets.items()):
             st.write(f"- **{yy}年 第{ww}週**：{tgt} 件")
@@ -531,26 +543,19 @@ with tab_week:
 
     st.divider()
     st.subheader("当週の達成率")
-    # 既存のデータから当週の合計を計算する（APP+LINE+アンケートを含めるかは運用に合わせて調整可能）
-    from datetime import date
+    # 既存のレコードから今週合計を集計（APP+アンケートを合算。必要に応じて調整）
     today = date.today()
     ty, tw, _ = today.isocalendar()
 
     # 既存の DataFrame を利用
-    if "data" in st.session_state:
-        df_all = ensure_dataframe(st.session_state.data)
-    else:
-        df_all = ensure_dataframe(load_all_records_cached()) if "load_all_records_cached" in globals() else None
+    df_all = ensure_dataframe(st.session_state.get("data", []))
 
     actual = 0
     if df_all is not None and not df_all.empty:
-        # df_all には "date", "type", "count" がある前提
         def is_same_week(dt):
             y2, w2, _ = dt.isocalendar()
             return (y2, w2) == (ty, tw)
-
         df_week = df_all[df_all["date"].apply(is_same_week)]
-        # ここでは APP (new/exist/line) + アンケート(survey) 全部を合算
         actual = int(df_week["count"].sum())
 
     tgt = int(st.session_state.weekly_targets.get((ty, tw), 0))
@@ -564,22 +569,23 @@ with tab_week:
     st.caption("※ 週の定義は ISO 週（週の開始は月曜日）です。")
 
 # -----------------------------
-# テスト記録（ローカル）
+# テスト記録（ローカルメモリ）
 # -----------------------------
 with tab_test:
-    st.subheader("テスト記録（ローカルメモリ）")
+    st.subheader("テスト記録（ローカル）")
     if "test_records" not in st.session_state:
-        st.session_state.test_records = []  # {"date", "staff", "new","exist","line","survey"}
+        st.session_state.test_records = []  # {"date","staff","new","exist","line","survey"}
 
+    from datetime import date
     c1, c2 = st.columns(2)
     with c1:
         rec_date = st.date_input("日付", value=date.today(), key="t_rec_date")
         staff = st.text_input("スタッフ名", value="", placeholder="例：山田")
     with c2:
-        new_cnt = st.number_input("新規（App）", min_value=0, step=1, value=0)
-        exist_cnt = st.number_input("既存（App）", min_value=0, step=1, value=0)
-        line_cnt = st.number_input("LINE", min_value=0, step=1, value=0)
-        survey_cnt = st.number_input("アンケート", min_value=0, step=1, value=0)
+        new_cnt = st.number_input("新規（App）", min_value=0, step=1, value=0, key="t_new")
+        exist_cnt = st.number_input("既存（App）", min_value=0, step=1, value=0, key="t_exist")
+        line_cnt = st.number_input("LINE", min_value=0, step=1, value=0, key="t_line")
+        survey_cnt = st.number_input("アンケート", min_value=0, step=1, value=0, key="t_survey")
 
     if st.button("➕ 追加", key="add_test_record"):
         st.session_state.test_records.append({
@@ -608,11 +614,7 @@ with tab_test:
             for r in st.session_state.test_records
         ])
         st.dataframe(df, use_container_width=True)
-        st.caption("※ これは表示確認用のローカルデータです。")
+        st.caption("※ 表示確認用のローカルデータです（本番は既存データから集計）。")
 
-
-# -----------------------------
-# データ管理
-# -----------------------------
 with tab3:
     show_data_management()
