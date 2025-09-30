@@ -237,7 +237,7 @@ def show_statistics(category: str, label: str):
             st.info("目標未設定")
     with colB:
         with st.popover("🎯 目標を設定/更新"):
-            new_target = st.number_input("今月目標", min_value=0, step=1, value=int(target), key=f"{key_prefix}_monthly_target")
+            new_target = st.number_input("今月目標", min_value=0, step=1, value=int(target), key=f"stats_{category}_monthly_target")
             if st.button(f"保存（{label}）"):
                 try:
                     set_target(ym, "app" if category == "app" else "survey", int(new_target))
