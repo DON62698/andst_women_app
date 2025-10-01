@@ -14,15 +14,19 @@ try:
         insert_or_update_record,
         set_target,
         get_target,
-        set_weekly_target,
-        get_weekly_target,
     )
-    from data_management import show_data_management
     GSHEETS_AVAILABLE = True
 except Exception:
     GSHEETS_AVAILABLE = False
 
-# ---- Weekly target fallbacks (always defined) ----
+# data_management import (safe fallback)
+try:
+    from data_management import show_data_management
+except Exception:
+    def show_data_management():
+        st.info("データ管理モジュールが読み込めません（data_management.py / 依存関係をご確認ください）。")
+
+# ---- Weekly target fallbacks (kept for backward compatibility; not used now) (always defined) ----
 def _wkstore():
     st.session_state.setdefault("_weekly_targets", {})  # key: (year, week, category) -> int
     return st.session_state["_weekly_targets"]
@@ -172,33 +176,56 @@ with tab_reg:
         st.markdown("#### 件数（アンケート）")
         survey_cnt = st.number_input("アンケート", min_value=0, step=1, value=0, key="reg_survey")
 
-        submitted = st.form_submit_button("保存")
-        if submitted:
-            if not name:
-                st.warning("名前を入力してください。")
+        
+submitted = st.form_submit_button("保存")
+if submitted:
+    if not name:
+        st.warning("名前を入力してください。")
+    else:
+        total = int(new_cnt) + int(exist_cnt) + int(line_cnt) + int(survey_cnt)
+        # 先にローカル用の新規行を作っておく（UI 即時反映のため）
+        _new_rows = []
+        if int(new_cnt)   > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "new",    "count": int(new_cnt)})
+        if int(exist_cnt) > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "exist",  "count": int(exist_cnt)})
+        if int(line_cnt)  > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "line",   "count": int(line_cnt)})
+        if int(survey_cnt)> 0: _new_rows.append({"date": ymd(d), "name": name, "type": "survey", "count": int(survey_cnt)})
+        try:
+            if total == 0:
+                if name and name not in st.session_state.names:
+                    st.session_state.names.append(name)
+                    st.session_state.names.sort()
+                st.info("名前を登録しました。（件数は 0 ）")
             else:
-                total = int(new_cnt) + int(exist_cnt) + int(line_cnt) + int(survey_cnt)
-                try:
-                    if total == 0:
-                        # 名前だけ登録
-                        if name and name not in st.session_state.names:
-                            st.session_state.names.append(name)
-                            st.session_state.names.sort()
-                        st.info("名前を登録しました。（件数は 0 ）")
-                    else:
-                        if new_cnt   > 0: insert_or_update_record(ymd(d), name, "new",    int(new_cnt))
-                        if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist",  int(exist_cnt))
-                        if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
-                        if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+                # バックエンドへ反映
+                if new_cnt   > 0: insert_or_update_record(ymd(d), name, "new",    int(new_cnt))
+                if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist",  int(exist_cnt))
+                if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
+                if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
 
-                        load_all_records_cached.clear()
-                        st.session_state.data = load_all_records_cached()
-                        # refresh names
-                        df0 = ensure_dataframe(st.session_state.data)
-                        st.session_state.names = sorted(df0["name"].dropna().unique().tolist())
-                        st.success("保存しました。")
-                except Exception as e:
-                    st.error(f"保存に失敗しました: {e}")
+                # 可能なら再読込（失敗時は空配列のまま）
+                load_all_records_cached.clear()
+                _reloaded = load_all_records_cached()
+
+                # ローカルに統合して UI を即時更新
+                import pandas as _pd
+                df_current = ensure_dataframe(st.session_state.get("data", []))
+                df_merge = _pd.concat([df_current, _pd.DataFrame(_reloaded or []), _pd.DataFrame(_new_rows)], ignore_index=True)
+                st.session_state.data = df_merge.to_dict("records")
+
+                # 名前一覧も更新
+                st.session_state.names = sorted(ensure_dataframe(st.session_state.data)["name"].dropna().unique().tolist())
+                st.success("保存しました。")
+        except Exception as e:
+            # バックアップ：ローカルにだけ反映
+            import pandas as _pd
+            df_current = ensure_dataframe(st.session_state.get("data", []))
+            df_merge = _pd.concat([df_current, _pd.DataFrame(_new_rows)], ignore_index=True)
+            st.session_state.data = df_merge.to_dict("records")
+            if name and name not in st.session_state.names:
+                st.session_state.names.append(name)
+                st.session_state.names.sort()
+            st.warning("バックエンド保存に失敗しましたが、ローカルには反映しました。")
+
 
     st.divider()
     
@@ -230,6 +257,7 @@ with tab_reg:
                 set_target(ym, "app", int(t_app_m_new))
                 set_target(ym, "survey", int(t_sur_m_new))
                 st.success("月目標を保存しました。")
+                st.rerun()
                 st.rerun()
             except Exception as e:
                 st.error(f"月目標の保存に失敗しました: {e}")
