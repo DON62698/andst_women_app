@@ -224,60 +224,60 @@ with tab_reg:
 
         
         
-submitted = st.form_submit_button("保存")
-if submitted:
-    if not name:
-        st.warning("名前を入力してください。")
-    else:
-        total = int(new_cnt) + int(exist_cnt) + int(line_cnt) + int(survey_cnt)
-        _new_rows = []
-        if int(new_cnt)   > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "new",    "count": int(new_cnt)})
-        if int(exist_cnt) > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "exist",  "count": int(exist_cnt)})
-        if int(line_cnt)  > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "line",   "count": int(line_cnt)})
-        if int(survey_cnt)> 0: _new_rows.append({"date": ymd(d), "name": name, "type": "survey", "count": int(survey_cnt)})
-        try:
-            if total == 0:
-                if name and name not in st.session_state.names:
-                    st.session_state.names.append(name)
-                    st.session_state.names.sort()
-                st.info("名前を登録しました。（件数は 0 ）")
+        submitted = st.form_submit_button("保存")
+        if submitted:
+            if not name:
+                st.warning("名前を入力してください。")
             else:
-                backend_ok = False
-                if BACKEND_OK:
-                    try:
-                        if new_cnt   > 0: insert_or_update_record(ymd(d), name, "new",    int(new_cnt))
-                        if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist",  int(exist_cnt))
-                        if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
-                        if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
-                        backend_ok = True
-                    except Exception:
+                total = int(new_cnt) + int(exist_cnt) + int(line_cnt) + int(survey_cnt)
+                _new_rows = []
+                if int(new_cnt)   > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "new",    "count": int(new_cnt)})
+                if int(exist_cnt) > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "exist",  "count": int(exist_cnt)})
+                if int(line_cnt)  > 0: _new_rows.append({"date": ymd(d), "name": name, "type": "line",   "count": int(line_cnt)})
+                if int(survey_cnt)> 0: _new_rows.append({"date": ymd(d), "name": name, "type": "survey", "count": int(survey_cnt)})
+                try:
+                    if total == 0:
+                        if name and name not in st.session_state.names:
+                            st.session_state.names.append(name)
+                            st.session_state.names.sort()
+                        st.info("名前を登録しました。（件数は 0 ）")
+                    else:
                         backend_ok = False
-
-                reloaded = []
-                if backend_ok:
-                    load_all_records_cached.clear()
-                    reloaded = load_all_records_cached() or []
-
-                import pandas as _pd
-                df_current = ensure_dataframe(st.session_state.get("data", []))
-                df_merge = _pd.concat([df_current, _pd.DataFrame(reloaded), _pd.DataFrame(_new_rows)], ignore_index=True)
-                st.session_state.data = df_merge.to_dict("records")
-
-                if not backend_ok:
+                        if BACKEND_OK:
+                            try:
+                                if new_cnt   > 0: insert_or_update_record(ymd(d), name, "new",    int(new_cnt))
+                                if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist",  int(exist_cnt))
+                                if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
+                                if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+                                backend_ok = True
+                            except Exception:
+                                backend_ok = False
+        
+                        reloaded = []
+                        if backend_ok:
+                            load_all_records_cached.clear()
+                            reloaded = load_all_records_cached() or []
+        
+                        import pandas as _pd
+                        df_current = ensure_dataframe(st.session_state.get("data", []))
+                        df_merge = _pd.concat([df_current, _pd.DataFrame(reloaded), _pd.DataFrame(_new_rows)], ignore_index=True)
+                        st.session_state.data = df_merge.to_dict("records")
+        
+                        if not backend_ok:
+                            local_save_records(st.session_state.data)
+        
+                        st.session_state.names = sorted(ensure_dataframe(st.session_state.data)["name"].dropna().unique().tolist())
+                        st.success("保存しました。")
+                except Exception as e:
+                    import pandas as _pd
+                    df_current = ensure_dataframe(st.session_state.get("data", []))
+                    df_merge = _pd.concat([df_current, _pd.DataFrame(_new_rows)], ignore_index=True)
+                    st.session_state.data = df_merge.to_dict("records")
                     local_save_records(st.session_state.data)
-
-                st.session_state.names = sorted(ensure_dataframe(st.session_state.data)["name"].dropna().unique().tolist())
-                st.success("保存しました。")
-        except Exception as e:
-            import pandas as _pd
-            df_current = ensure_dataframe(st.session_state.get("data", []))
-            df_merge = _pd.concat([df_current, _pd.DataFrame(_new_rows)], ignore_index=True)
-            st.session_state.data = df_merge.to_dict("records")
-            local_save_records(st.session_state.data)
-            if name and name not in st.session_state.names:
-                st.session_state.names.append(name)
-                st.session_state.names.sort()
-            st.warning("バックエンド保存に失敗しましたが、ローカルには反映しました。")
+                    if name and name not in st.session_state.names:
+                        st.session_state.names.append(name)
+                        st.session_state.names.sort()
+                    st.warning("バックエンド保存に失敗しましたが、ローカルには反映しました。")
 
 
 
