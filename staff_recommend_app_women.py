@@ -279,13 +279,15 @@ with tab_reg:
 # =============================
 
 
+
 def show_statistics(category: str, label: str):
     """
-    男生版風格：
-     - 週別合計: 表格（選択した年・月）
-     - 構成比（and stのみ）: 円グラフ
-     - スタッフ別 合計: 棒グラフ＋数値
-     - 月別累計（年次）: 折れ線
+    男生版の操作感に合わせる：
+      - 期間選択：年（単年）/ 月（年内）
+      - 月（年内）選択時のみ「週別合計」テーブル
+      - 構成比（and st のみ）：円グラフ（期間に応じて年 or 月）
+      - スタッフ別 合計：棒グラフ（期間に応じて年 or 月、数値付き）
+      - 月別累計（年次）：選んだ年の各月合計テーブル
     """
     import matplotlib.pyplot as plt
 
@@ -295,111 +297,102 @@ def show_statistics(category: str, label: str):
         st.info("データがありません。")
         return
 
-    # 年・月選択（安全化）
-    years = sorted(pd.to_datetime(df_all["date"]).dt.year.unique().tolist())
-    if not years:
-        st.info("年データがありません。")
-        return
-    colY, colM = st.columns([1, 2])
-    with colY:
-        yearW = st.selectbox("年", options=years, index=len(years)-1, key=f"{label}_year")
-    with colM:
-        maskY = pd.to_datetime(df_all["date"]).dt.year == yearW
-        months = sorted(pd.to_datetime(df_all[maskY]["date"]).dt.month.unique().tolist())
-        if not months:
-            st.info(f"{yearW} 年のデータがありません。")
-            return
-        monthW = st.select_slider("月", options=months, value=months[-1], key=f"{label}_month")
-
-    # === 週別合計 ===
-    st.subheader("週別合計")
-    mask_m = (pd.to_datetime(df_all["date"]).dt.year == yearW) & (pd.to_datetime(df_all["date"]).dt.month == monthW)
-    df_monthW = df_all[mask_m].copy()
+    # カテゴリでフィルタ
     if category == "app":
-        df_monthW = df_monthW[df_monthW["type"].isin(["new", "exist", "line"])]
+        df_cat = df_all[df_all["type"].isin(["new", "exist", "line"])].copy()
     else:
-        df_monthW = df_monthW[df_monthW["type"] == "survey"]
-    if df_monthW.empty:
-        st.info("この月のデータがありません。")
-    else:
-        df_monthW["date"] = pd.to_datetime(df_monthW["date"])
-        df_monthW["week_iso"] = df_monthW["date"].dt.isocalendar().week.astype(int)
-        uniq_weeks = sorted(df_monthW["week_iso"].unique().tolist())
-        mapping = {wk: i+1 for i, wk in enumerate(uniq_weeks)}
-        df_monthW["w_num"] = df_monthW["week_iso"].map(mapping)
-        weekly = df_monthW.groupby("w_num")["count"].sum().reset_index().sort_values("w_num")
-        weekly["w"] = weekly["w_num"].apply(lambda x: f"w{x}")
-        st.caption(f"表示中：{yearW}年・{monthW}月")
-        st.dataframe(weekly[["w", "count"]].rename(columns={"count": "合計"}), use_container_width=True)
+        df_cat = df_all[df_all["type"] == "survey"].copy()
+    if df_cat.empty:
+        st.info("対象データがありません。")
+        return
 
-    # === 構成比（and stのみ） ===
+    df_cat["date"] = pd.to_datetime(df_cat["date"])
+
+    # 期間の選択
+    years = sorted(df_cat["date"].dt.year.unique().tolist())
+    colP, colY, colM = st.columns([1.2, 1, 2])
+    with colP:
+        ptype = st.selectbox("期間", options=["年（単年）", "月（年内）"], key=f"{label}_ptype")
+    with colY:
+        default_year = years[-1] if years else date.today().year
+        year_sel = st.selectbox("年を選択", options=years or [default_year], index=(len(years)-1 if years else 0), key=f"{label}_year")
+    with colM:
+        if ptype == "月（年内）":
+            months = sorted(df_cat[df_cat["date"].dt.year == year_sel]["date"].dt.month.unique().tolist())
+            if not months:
+                st.info(f"{year_sel} 年のデータがありません。")
+                return
+            month_sel = st.select_slider("月を選択", options=months, value=months[-1], key=f"{label}_month")
+        else:
+            month_sel = None
+
+    # ==== 週別合計（「月（年内）」のときだけ）====
+    if ptype == "月（年内）":
+        st.subheader("週別合計")
+        df_m = df_cat[(df_cat["date"].dt.year == year_sel) & (df_cat["date"].dt.month == month_sel)].copy()
+        if df_m.empty:
+            st.info("この月のデータがありません。")
+        else:
+            weeks = df_m["date"].dt.isocalendar().week.astype(int)
+            uniq_weeks = sorted(weeks.unique().tolist())
+            wmap = {wk: i+1 for i, wk in enumerate(uniq_weeks)}
+            df_m["w_num"] = weeks.map(wmap)
+            weekly = df_m.groupby("w_num")["count"].sum().reset_index().sort_values("w_num")
+            weekly["w"] = weekly["w_num"].apply(lambda x: f"w{x}")
+            st.caption(f"表示中：{year_sel}年・{month_sel}月")
+            st.dataframe(weekly[["w", "count"]].rename(columns={"count": "合計"}), use_container_width=True)
+
+    # ==== 構成比（and stのみ）====
     if category == "app":
         st.subheader("構成比（新規・既存・LINE）")
-        df_c = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
-        df_c = df_c[df_c["type"].isin(["new", "exist", "line"])]
-        comp = df_c.groupby("type")["count"].sum().reindex(["new", "exist", "line"]).fillna(0)
-        total = comp.sum()
-        if total <= 0:
-            st.caption("データが不足しています。")
+        if ptype == "年（単年）":
+            df_comp = df_cat[df_cat["date"].dt.year == year_sel].copy()
+            caption = f"表示中：{year_sel}年"
         else:
+            df_comp = df_cat[(df_cat["date"].dt.year == year_sel) & (df_cat["date"].dt.month == month_sel)].copy()
+            caption = f"表示中：{year_sel}年・{month_sel}月"
+        new_sum   = int(df_comp[df_comp["type"] == "new"]["count"].sum())
+        exist_sum = int(df_comp[df_comp["type"] == "exist"]["count"].sum())
+        line_sum  = int(df_comp[df_comp["type"] == "line"]["count"].sum())
+        total = new_sum + exist_sum + line_sum
+        if total > 0:
+            st.caption(caption)
             labels = ["新規", "既存", "LINE"]
             fig = plt.figure()
-            plt.pie(comp.values, labels=labels, autopct="%1.1f%%", startangle=90)
-            plt.axis("equal")
+            plt.pie([new_sum, exist_sum, line_sum], labels=labels, autopct="%1.1f%%", startangle=90)
             st.pyplot(fig)
+        else:
+            st.caption("対象データがありません。")
 
-    # === スタッフ別 合計 ===
+    # ==== スタッフ別 合計 ====
     st.subheader("スタッフ別 合計")
-    df_s = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
-    if category == "app":
-        df_s = df_s[df_s["type"].isin(["new", "exist", "line"])]
+    if ptype == "年（単年）":
+        df_staff = df_cat[df_cat["date"].dt.year == year_sel].copy()
     else:
-        df_s = df_s[df_s["type"] == "survey"]
-    if df_s.empty:
-        st.caption("データがありません。")
+        df_staff = df_cat[(df_cat["date"].dt.year == year_sel) & (df_cat["date"].dt.month == month_sel)].copy()
+    if df_staff.empty:
+        st.caption("対象データがありません。")
     else:
-        by_staff = df_s.groupby("name")["count"].sum().sort_values(ascending=False)
+        ser = df_staff.groupby("name")["count"].sum().sort_values(ascending=False)
         fig2 = plt.figure()
-        bars = plt.bar(by_staff.index.tolist(), by_staff.values.tolist())
+        bars = plt.bar(ser.index.tolist(), ser.values.tolist())
         plt.xticks(rotation=45, ha="right")
-        ymax = max(by_staff.values.tolist() + [1])
+        ymax = max(ser.values.tolist() + [1])
         plt.ylim(0, ymax * 1.15)
-        for bar, val in zip(bars, by_staff.values.tolist()):
-            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{int(val)}", ha="center", va="bottom", fontsize=9)
+        for b, v in zip(bars, ser.values.tolist()):
+            plt.text(b.get_x() + b.get_width()/2, b.get_height(), f"{int(v)}", ha="center", va="bottom", fontsize=9)
         st.pyplot(fig2)
 
-    # === 月別累計（年次） ===
+    # ==== 月別累計（年次）====
     st.subheader("月別累計（年次）")
-    df_y = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
-    if category == "app":
-        df_y = df_y[df_y["type"].isin(["new", "exist", "line"])]
-    else:
-        df_y = df_y[df_y["type"] == "survey"]
+    df_y = df_cat[df_cat["date"].dt.year == year_sel].copy()
     if df_y.empty:
-        st.caption("データがありません。")
+        st.caption("対象データがありません。")
     else:
-        df_y["ym"] = pd.to_datetime(df_y["date"]).dt.strftime("%Y-%m")
-        mg = df_y.groupby("ym")["count"].sum().reset_index()
-        st.line_chart(mg.set_index("ym"))
-
-
-# =============================
-# and st 分析
-# =============================
-with tab_app_ana:
-    show_statistics("app", "and st 分析")
-
-# =============================
-# アンケート分析
-# =============================
-with tab_survey_ana:
-    show_statistics("survey", "アンケート分析")
-
-# =============================
-# データ管理
-# =============================
-with tab_manage:
-    try:
-        show_data_management()
-    except Exception as e:
-        st.error(f"データ管理画面の読み込みに失敗しました: {e}")
+        monthly = (
+            df_y.groupby(df_y["date"].dt.strftime("%Y-%m"))["count"].sum().reset_index()
+            .rename(columns={"date": "年月", "count": "合計"})
+        )
+        monthly = monthly.sort_values("年月")
+        st.caption(f"表示中：{year_sel}年")
+        st.dataframe(monthly.rename(columns={monthly.columns[0]: "年月"}), use_container_width=True)
