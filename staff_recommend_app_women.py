@@ -129,7 +129,8 @@ with st.sidebar:
 
 # ---- Load initial data and names ----
 if "data" not in st.session_state:
-    st.session_state.data = load_all_records_cached()
+    load_all_records_cached.clear()
+                        st.session_state.data = load_all_records_cached()
 
 if "names" not in st.session_state:
     # 現有資料中的姓名清單
@@ -190,6 +191,7 @@ with tab_reg:
                         if line_cnt  > 0: insert_or_update_record(ymd(d), name, "line",   int(line_cnt))
                         if survey_cnt> 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
 
+                        load_all_records_cached.clear()
                         st.session_state.data = load_all_records_cached()
                         # refresh names
                         df0 = ensure_dataframe(st.session_state.data)
@@ -228,6 +230,7 @@ with tab_reg:
                 set_target(ym, "app", int(t_app_m_new))
                 set_target(ym, "survey", int(t_sur_m_new))
                 st.success("月目標を保存しました。")
+                st.rerun()
             except Exception as e:
                 st.error(f"月目標の保存に失敗しました: {e}")
 
@@ -350,3 +353,25 @@ def show_statistics(category: str, label: str):
         df_y["ym"] = pd.to_datetime(df_y["date"]).dt.strftime("%Y-%m")
         mg = df_y.groupby("ym")["count"].sum().reset_index()
         st.line_chart(mg.set_index("ym"))
+
+
+# =============================
+# and st 分析
+# =============================
+with tab_app_ana:
+    show_statistics("app", "and st 分析")
+
+# =============================
+# アンケート分析
+# =============================
+with tab_survey_ana:
+    show_statistics("survey", "アンケート分析")
+
+# =============================
+# データ管理
+# =============================
+with tab_manage:
+    try:
+        show_data_management()
+    except Exception as e:
+        st.error(f"データ管理画面の読み込みに失敗しました: {e}")
