@@ -244,6 +244,8 @@ def show_statistics(category: str, label: str):
                     get_target_safe.clear()
                     st.success("保存しました。")
 
+                except Exception as e:
+                    st.error(f"保存に失敗しました: {e}")
     st.divider()
     st.subheader("達成率（週 / 月）")
 
