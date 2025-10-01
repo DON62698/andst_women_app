@@ -200,109 +200,61 @@ with tab_reg:
 
     st.divider()
     
-    st.subheader("達成率（週 / 月）")
+    
+    st.subheader("月目標 & 達成率")
     df_all = ensure_dataframe(st.session_state.get("data", []))
     ym = current_year_month()
-    y, w = week_of(date.today())
 
-    with st.popover("🎯 目標を設定 / 更新", use_container_width=True):
-        colW, colM = st.columns(2)
-
-        with colW:
-            st.markdown("**週目標（今週）**")
-            # Load existing (Sheets first, fallback to session_state)
-            if BACKEND_OK:
-                t_app_w = get_weekly_target(y, w, "app")
-                t_sur_w = get_weekly_target(y, w, "survey")
-            else:
-                t_app_w = int(st.session_state.get("weekly_targets_app", {}).get((y, w), 0))
-                t_sur_w = int(st.session_state.get("weekly_targets_survey", {}).get((y, w), 0))
-
-            cw1, cw2 = st.columns(2)
-            with cw1:
-                t_app_w_new = st.number_input("and st（週）", min_value=0, step=1, value=int(t_app_w), key=f"wk_app_{y}_{w}")
-            with cw2:
-                t_sur_w_new = st.number_input("アンケート（週）", min_value=0, step=1, value=int(t_sur_w), key=f"wk_survey_{y}_{w}")
-
-            if st.button("週目標を保存", key=f"save_wk_{y}_{w}"):
-                if BACKEND_OK:
-                    set_weekly_target(y, w, "app", int(t_app_w_new))
-                    set_weekly_target(y, w, "survey", int(t_sur_w_new))
-                else:
-                    st.session_state.setdefault("weekly_targets_app", {})[(y, w)] = int(t_app_w_new)
-                    st.session_state.setdefault("weekly_targets_survey", {})[(y, w)] = int(t_sur_w_new)
-                st.success("今週の目標を保存しました。")
-
-        with colM:
-            st.markdown("**月目標（{ym}）**")
-            t_app_m = get_target_safe(ym, "app")
-            t_sur_m = get_target_safe(ym, "survey")
-            cm1, cm2 = st.columns(2)
-            with cm1:
-                t_app_m_new = st.number_input("and st（月）", min_value=0, step=1, value=int(t_app_m), key=f"mon_app_{ym}")
-            with cm2:
-                t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=int(t_sur_m), key=f"mon_survey_{ym}")
-            if st.button("月目標を保存", key=f"save_mon_{ym}"):
-                try:
-                    set_target(ym, "app", int(t_app_m_new))
-                    set_target(ym, "survey", int(t_sur_m_new))
-                    st.success("月目標を保存しました。")
-                except Exception as e:
-                    st.error(f"月目標の保存に失敗しました: {e}")
-
-    # 実績集計（今週 / 今月、and st / アンケート）
-    def is_this_week(d0: date) -> bool:
-        yy, ww, _ = datetime(d0.year, d0.month, d0.day).isocalendar()
-        return (yy, ww) == (y, w)
-
-    week_app = week_survey = month_app = month_survey = 0
+    # 実績（今月）
+    month_app = month_survey = 0
     if not df_all.empty:
-        df_week = df_all[df_all["date"].apply(is_this_week)]
-        week_app = int(df_week[df_week["type"].isin(["new", "exist", "line"])]["count"].sum())
-        week_survey = int(df_week[df_week["type"] == "survey"]["count"].sum())
-
         df_m = month_filter(df_all, ym)
         month_app = int(df_m[df_m["type"].isin(["new", "exist", "line"])]["count"].sum())
         month_survey = int(df_m[df_m["type"] == "survey"]["count"].sum())
 
-    if BACKEND_OK:
-        tgt_app_w = get_weekly_target(y, w, "app")
-        tgt_sur_w = get_weekly_target(y, w, "survey")
-    else:
-        tgt_app_w = int(st.session_state.get("weekly_targets_app", {}).get((y, w), 0))
-        tgt_sur_w = int(st.session_state.get("weekly_targets_survey", {}).get((y, w), 0))
+    # 目標（今月）
+    t_app_m = get_target_safe(ym, "app")
+    t_sur_m = get_target_safe(ym, "survey")
 
-    tgt_app_m = get_target_safe(ym, "app")
-    tgt_sur_m = get_target_safe(ym, "survey")
+    # 設定 UI（簡潔）：Popover で 2 欄（and st / アンケート）
+    with st.popover("🎯 月目標を設定 / 更新", use_container_width=True):
+        cm1, cm2 = st.columns(2)
+        with cm1:
+            t_app_m_new = st.number_input("and st（月）", min_value=0, step=1, value=int(t_app_m), key=f"mon_app_{ym}")
+        with cm2:
+            t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=int(t_sur_m), key=f"mon_survey_{ym}")
+        if st.button("月目標を保存", key=f"save_mon_{ym}"):
+            try:
+                set_target(ym, "app", int(t_app_m_new))
+                set_target(ym, "survey", int(t_sur_m_new))
+                st.success("月目標を保存しました。")
+            except Exception as e:
+                st.error(f"月目標の保存に失敗しました: {e}")
 
+    # Metrics（今月：実績/目標/達成率）
     def pct(a, b): return (a / b * 100.0) if b and b > 0 else 0.0
+    m1, m2, m3 = st.columns(3)
+    with m1: st.metric("and st（月）実績", f"{month_app} 件")
+    with m2: st.metric("and st（月）目標", f"{t_app_m} 件")
+    with m3: st.metric("and st（月）達成率", f"{pct(month_app, t_app_m):.1f}%")
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1: st.metric("and st（週）実績", f"{week_app} 件")
-    with m2: st.metric("and st（週）目標", f"{tgt_app_w} 件")
-    with m3: st.metric("and st（月）実績", f"{month_app} 件")
-    with m4: st.metric("and st（月）目標", f"{tgt_app_m} 件")
-
-    m5, m6, m7, m8 = st.columns(4)
-    with m5: st.metric("アンケート（週）実績", f"{week_survey} 件")
-    with m6: st.metric("アンケート（週）目標", f"{tgt_sur_w} 件")
-    with m7: st.metric("アンケート（月）実績", f"{month_survey} 件")
-    with m8: st.metric("アンケート（月）目標", f"{tgt_sur_m} 件")
-
-    st.caption(f"and st（週） 達成率：{pct(week_app, tgt_app_w):.1f}% ／ 月：{pct(month_app, tgt_app_m):.1f}%")
-    st.caption(f"アンケート（週） 達成率：{pct(week_survey, tgt_sur_w):.1f}% ／ 月：{pct(month_survey, tgt_sur_m):.1f}%")
-    
+    m4, m5, m6 = st.columns(3)
+    with m4: st.metric("アンケート（月）実績", f"{month_survey} 件")
+    with m5: st.metric("アンケート（月）目標", f"{t_sur_m} 件")
+    with m6: st.metric("アンケート（月）達成率", f"{pct(month_survey, t_sur_m):.1f}%")
+        
 # =============================
 # 分析共通関数
 # =============================
 
+
 def show_statistics(category: str, label: str):
     """
-    Mirror male app display:
-     - 週別合計: table (current selected 年・月)
-     - 構成比（and stのみ）: pie
-     - スタッフ別 合計: bar with values
-     - 月別累計（年次）: line
+    男生版風格：
+     - 週別合計: 表格（選択した年・月）
+     - 構成比（and stのみ）: 円グラフ
+     - スタッフ別 合計: 棒グラフ＋数値
+     - 月別累計（年次）: 折れ線
     """
     import matplotlib.pyplot as plt
 
@@ -312,32 +264,35 @@ def show_statistics(category: str, label: str):
         st.info("データがありません。")
         return
 
-    # フィルタ選択：年・月
-    year_opts = sorted(pd.to_datetime(df_all["date"]).dt.year.unique().tolist())
+    # 年・月選択（安全化）
+    years = sorted(pd.to_datetime(df_all["date"]).dt.year.unique().tolist())
+    if not years:
+        st.info("年データがありません。")
+        return
     colY, colM = st.columns([1, 2])
     with colY:
-        yearW = st.selectbox("年", options=year_opts, index=len(year_opts)-1, key=f"{label}_year")
+        yearW = st.selectbox("年", options=years, index=len(years)-1, key=f"{label}_year")
     with colM:
-        # 該当年の月一覧
-        months = sorted(pd.to_datetime(df_all[pd.to_datetime(df_all["date"]).dt.year == yearW]["date"]).dt.month.unique().tolist())
+        maskY = pd.to_datetime(df_all["date"]).dt.year == yearW
+        months = sorted(pd.to_datetime(df_all[maskY]["date"]).dt.month.unique().tolist())
+        if not months:
+            st.info(f"{yearW} 年のデータがありません。")
+            return
         monthW = st.select_slider("月", options=months, value=months[-1], key=f"{label}_month")
 
     # === 週別合計 ===
     st.subheader("週別合計")
-    mask_y = pd.to_datetime(df_all["date"]).dt.year == yearW
-    mask_m = pd.to_datetime(df_all["date"]).dt.month == monthW
-    df_monthW = df_all[mask_y & mask_m].copy()
+    mask_m = (pd.to_datetime(df_all["date"]).dt.year == yearW) & (pd.to_datetime(df_all["date"]).dt.month == monthW)
+    df_monthW = df_all[mask_m].copy()
     if category == "app":
         df_monthW = df_monthW[df_monthW["type"].isin(["new", "exist", "line"])]
     else:
         df_monthW = df_monthW[df_monthW["type"] == "survey"]
-
     if df_monthW.empty:
         st.info("この月のデータがありません。")
     else:
         df_monthW["date"] = pd.to_datetime(df_monthW["date"])
         df_monthW["week_iso"] = df_monthW["date"].dt.isocalendar().week.astype(int)
-        # w番号（1..5）へ正規化：その月の週番号を小さい順に並べて1,2,3...
         uniq_weeks = sorted(df_monthW["week_iso"].unique().tolist())
         mapping = {wk: i+1 for i, wk in enumerate(uniq_weeks)}
         df_monthW["w_num"] = df_monthW["week_iso"].map(mapping)
@@ -349,42 +304,49 @@ def show_statistics(category: str, label: str):
     # === 構成比（and stのみ） ===
     if category == "app":
         st.subheader("構成比（新規・既存・LINE）")
-        df_c = df_all.copy()
-        df_c = df_c[pd.to_datetime(df_c["date"]).dt.year == yearW]
+        df_c = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
         df_c = df_c[df_c["type"].isin(["new", "exist", "line"])]
         comp = df_c.groupby("type")["count"].sum().reindex(["new", "exist", "line"]).fillna(0)
-        labels = ["新規", "既存", "LINE"]
-        plt.figure()
-        plt.pie(comp.values, labels=labels, autopct="%1.1f%%", startangle=90)
-        plt.axis("equal")
-        st.pyplot(plt.gcf())
+        total = comp.sum()
+        if total <= 0:
+            st.caption("データが不足しています。")
+        else:
+            labels = ["新規", "既存", "LINE"]
+            fig = plt.figure()
+            plt.pie(comp.values, labels=labels, autopct="%1.1f%%", startangle=90)
+            plt.axis("equal")
+            st.pyplot(fig)
 
     # === スタッフ別 合計 ===
     st.subheader("スタッフ別 合計")
-    df_s = df_all.copy()
-    df_s = df_s[pd.to_datetime(df_s["date"]).dt.year == yearW]
+    df_s = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
     if category == "app":
         df_s = df_s[df_s["type"].isin(["new", "exist", "line"])]
     else:
         df_s = df_s[df_s["type"] == "survey"]
-    by_staff = df_s.groupby("name")["count"].sum().sort_values(ascending=False)
-    plt.figure()
-    bars = plt.bar(by_staff.index.tolist(), by_staff.values.tolist())
-    plt.xticks(rotation=45, ha="right")
-    ymax = max(by_staff.values.tolist() + [1])
-    plt.ylim(0, ymax * 1.15)
-    for bar, val in zip(bars, by_staff.values.tolist()):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{int(val)}", ha="center", va="bottom", fontsize=9)
-    st.pyplot(plt.gcf())
+    if df_s.empty:
+        st.caption("データがありません。")
+    else:
+        by_staff = df_s.groupby("name")["count"].sum().sort_values(ascending=False)
+        fig2 = plt.figure()
+        bars = plt.bar(by_staff.index.tolist(), by_staff.values.tolist())
+        plt.xticks(rotation=45, ha="right")
+        ymax = max(by_staff.values.tolist() + [1])
+        plt.ylim(0, ymax * 1.15)
+        for bar, val in zip(bars, by_staff.values.tolist()):
+            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{int(val)}", ha="center", va="bottom", fontsize=9)
+        st.pyplot(fig2)
 
     # === 月別累計（年次） ===
     st.subheader("月別累計（年次）")
-    df_y = df_all.copy()
-    df_y = df_y[pd.to_datetime(df_y["date"]).dt.year == yearW]
+    df_y = df_all[pd.to_datetime(df_all["date"]).dt.year == yearW].copy()
     if category == "app":
         df_y = df_y[df_y["type"].isin(["new", "exist", "line"])]
     else:
         df_y = df_y[df_y["type"] == "survey"]
-    df_y["ym"] = pd.to_datetime(df_y["date"]).dt.strftime("%Y-%m")
-    mg = df_y.groupby("ym")["count"].sum().reset_index()
-    st.line_chart(mg.set_index("ym"))
+    if df_y.empty:
+        st.caption("データがありません。")
+    else:
+        df_y["ym"] = pd.to_datetime(df_y["date"]).dt.strftime("%Y-%m")
+        mg = df_y.groupby("ym")["count"].sum().reset_index()
+        st.line_chart(mg.set_index("ym"))
