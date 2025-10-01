@@ -332,9 +332,6 @@ def show_statistics(category: str, label: str):
     st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
     st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
 
-                except Exception as e:
-                    st.error(f"保存失敗: {e}")
-
     # === 週別合計（w）— 預設當月；可選 年 + 月 ===
     st.subheader("週別合計")
     yearsW = year_options(df_all)
@@ -618,9 +615,6 @@ with tab_reg:
     st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
     st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
 
-                except Exception as e:
-                    st.error(f"保存に失敗しました: {e}")
-
 # 旧APPフォームは完全に削除しました（統合フォームへ移行済み）。
 
 # -----------------------------
@@ -746,9 +740,6 @@ with tab2:
     st.caption(f"and st（週） 達成率：{_pct(_week_app, _tgt_app_w):.1f}% ／ 月：{_pct(_month_app, _tgt_app_m):.1f}%")
     st.caption(f"アンケート（週） 達成率：{_pct(_week_survey, _tgt_sur_w):.1f}% ／ 月：{_pct(_month_survey, _tgt_sur_m):.1f}%")
 
-                except Exception as e:
-                    st.error(f"保存失敗: {e}")
-
     show_statistics("survey", "アンケート")
     render_refresh_button("refresh_survey_tab")
 
@@ -770,70 +761,6 @@ with tab_app_ana:
 # -----------------------------
 with tab_survey_ana:
     show_statistics("survey", "アンケート分析")
-
-with tab_rate:
-    st.subheader("週目標の設定")
-    from datetime import date
-    target_date = st.date_input("週の判定用の日付", value=date.today(), key="wk_pick")
-    y, w, _ = target_date.isocalendar()
-    st.write(f"ISO 週: **{y} 年 第 {w} 週**")
-
-    if "weekly_targets" not in st.session_state:
-        st.session_state.weekly_targets = {}  # {(year, week): target}
-
-    current_target = int(st.session_state.weekly_targets.get((y, w), 0))
-    new_target = st.number_input("本週の目標（件）", min_value=0, step=1, value=current_target, key=f"weekly_target_input_{y}_{w}")
-    cA, cB = st.columns(2)
-    with cA:
-        if st.button("💾 保存／更新", key=f"save_week_target_{y}_{w}"):
-            st.session_state.weekly_targets[(y, w)] = int(new_target)
-            st.success(f"{y}年 第{w}週 の目標を {int(new_target)} 件に更新しました。")
-    with cB:
-        if st.button("🗑️ クリア", key=f"clear_week_target_{y}_{w}"):
-            if (y, w) in st.session_state.weekly_targets:
-                del st.session_state.weekly_targets[(y, w)]
-                st.warning(f"{y}年 第{w}週 の目標をクリアしました。")
-            else:
-                st.info("この週の目標は未設定です。")
-
-    st.divider()
-    st.markdown("#### 設定済みの週目標")
-    if st.session_state.weekly_targets:
-        for (yy, ww), tgt in sorted(st.session_state.weekly_targets.items()):
-            st.write(f"- **{yy}年 第{ww}週**：{tgt} 件")
-    else:
-        st.caption("まだ設定がありません。")
-
-    st.divider()
-    st.subheader("当週の達成率")
-    today = date.today()
-    ty, tw, _ = today.isocalendar()
-
-    # 既存の DataFrame を利用（空でもOK）
-    df_all = ensure_dataframe(st.session_state.get("data", []))
-
-    actual = 0
-    if df_all is not None and not df_all.empty:
-        def is_same_week(dt):
-            y2, w2, _ = dt.isocalendar()
-            return (y2, w2) == (ty, tw)
-        df_week = df_all[df_all["date"].apply(is_same_week)]
-        actual = int(df_week["count"].sum())
-
-    tgt = int(st.session_state.weekly_targets.get((ty, tw), 0))
-
-    col1, col2, col3 = st.columns(3)
-    with col1: st.metric("本週目標", f"{tgt} 件")
-    with col2: st.metric("本週実績", f"{actual} 件")
-    with col3:
-        rate = (actual / tgt * 100) if tgt > 0 else 0.0
-        st.metric("達成率", f"{rate:.1f}%")
-    st.caption("※ 週の定義は ISO 週（週の開始は月曜日）です。")
-
-# -----------------------------
-# テスト記録（ローカルメモリ）
-# -----------------------------
-# （テスト記録ページは不要のため削除）
 
 with tab_manage:
     show_data_management()
