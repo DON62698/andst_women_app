@@ -307,23 +307,20 @@ if submitted:
         with cm2:
             t_sur_m_new = st.number_input("アンケート（月）", min_value=0, step=1, value=int(t_sur_m), key=f"mon_survey_{ym}")
         if st.button("月目標を保存", key=f"save_mon_{ym}"):
-        try:
-            if BACKEND_OK:
-                set_target(ym, "app", int(t_app_m_new))
-                set_target(ym, "survey", int(t_sur_m_new))
-            else:
-                local_set_target(ym, "app", int(t_app_m_new))
-                local_set_target(ym, "survey", int(t_sur_m_new))
-            st.success("月目標を保存しました。")
-            st.rerun()
-        except Exception as e:
-            local_set_target(ym, "app", int(t_app_m_new))
-            local_set_target(ym, "survey", int(t_sur_m_new))
-            st.success("月目標を保存しました。（ローカルに保存）")
-            st.rerun()
+            try:
+                if BACKEND_OK:
+                    set_target(ym, "app", int(t_app_m_new))
+                    set_target(ym, "survey", int(t_sur_m_new))
+                else:
+                    local_set_target(ym, "app", int(t_app_m_new))
+                    local_set_target(ym, "survey", int(t_sur_m_new))
+                st.success("月目標を保存しました。")
                 st.rerun()
             except Exception as e:
-                st.error(f"月目標の保存に失敗しました: {e}")
+                local_set_target(ym, "app", int(t_app_m_new))
+                local_set_target(ym, "survey", int(t_sur_m_new))
+                st.success("月目標を保存しました。（ローカルに保存）")
+                st.rerun()
 
     # Metrics（今月：実績/目標/達成率）
     def pct(a, b): return (a / b * 100.0) if b and b > 0 else 0.0
