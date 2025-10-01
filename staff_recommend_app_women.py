@@ -22,6 +22,22 @@ try:
 except Exception:
     GSHEETS_AVAILABLE = False
 
+# ---- Weekly target fallbacks (always defined) ----
+def _wkstore():
+    st.session_state.setdefault("_weekly_targets", {})  # key: (year, week, category) -> int
+    return st.session_state["_weekly_targets"]
+
+if "get_weekly_target" not in globals():
+    def get_weekly_target(year: int, week: int, category: str) -> int:
+        store = _wkstore()
+        return int(store.get((int(year), int(week), str(category)), 0))
+
+if "set_weekly_target" not in globals():
+    def set_weekly_target(year: int, week: int, category: str, value: int):
+        store = _wkstore()
+        store[(int(year), int(week), str(category))] = int(value)
+        return True
+
 # ---- Page config ----
 st.set_page_config(page_title="and st 女生組", page_icon="icon.png", layout="wide")
 
