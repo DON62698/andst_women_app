@@ -130,7 +130,7 @@ with st.sidebar:
 # ---- Load initial data and names ----
 if "data" not in st.session_state:
     load_all_records_cached.clear()
-                        st.session_state.data = load_all_records_cached()
+    st.session_state.data = load_all_records_cached()
 
 if "names" not in st.session_state:
     # 現有資料中的姓名清單
