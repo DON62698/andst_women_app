@@ -40,7 +40,6 @@ try:
         _JP_FONT_CANDIDATES = [
             "Noto Sans CJK JP", "Noto Sans JP", "IPAGothic", "IPAexGothic",
             "TakaoGothic", "Yu Gothic", "Hiragino Sans", "Meiryo", "MS Gothic",
-            "PingFang TC", "PingFang SC", "Heiti TC", "Heiti SC"
         ]
         available = {f.name for f in font_manager.fontManager.ttflist}
         for _name in _JP_FONT_CANDIDATES:
@@ -54,7 +53,7 @@ except Exception:
 rcParams["axes.unicode_minus"] = False
 
 # -----------------------------
-# Backend（沿用你現有的模組）
+# Backend（沿用你的模組）
 # -----------------------------
 from db_gsheets import (
     init_db,
@@ -123,7 +122,7 @@ def _week_label(week_number: int) -> str:
     """直接用 ISO 週：例如 40 -> 'w40'"""
     return f"w{int(week_number)}"
 
-# ---- 期間選項 / 過濾（供分析頁用，保持與男生版一致的操作手感）----
+# ---- 期間選項 / 過濾（供分析頁用，維持你既有操作手感）----
 def _period_options(df: pd.DataFrame, mode: str, selected_year: int):
     if "date" not in df.columns or df["date"].isna().all():
         today = date.today()
@@ -193,7 +192,7 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
             st.rerun()
 
 # -----------------------------
-# 能量條達成率（第一頁）
+# 能量條達成率（第一頁用）
 # -----------------------------
 def render_rate_block(category: str, label: str, current_total: int, target: int, ym: str):
     """
@@ -380,54 +379,57 @@ def show_statistics(category: str, label: str):
         st.pyplot(plt.gcf())
 
 # -----------------------------
-# Tabs（前兩個標籤照你指定；其他頁面保留）
+# Tabs（第一頁 = 合併的 件数登録；其他分頁不動）
 # -----------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["件数 and st", "件数 アンケート", "and st 分析", "アンケート分析", "データ管理"])
+tab_reg, tab3, tab4, tab5 = st.tabs(["件数登録", "and st 分析", "アンケート分析", "データ管理"])
 
 # -----------------------------
-# 件数 and st
+# 件数登録（and st + アンケート 合併頁）
 # -----------------------------
-with tab1:
-    st.subheader("件数 and st")
-    with st.form("app_form"):
-        c1, c2, c3 = st.columns([2, 2, 1])
+with tab_reg:
+    st.subheader("件数登録")
+    with st.form("reg_form"):
+        c1, c2 = st.columns([2, 2])
         with c1:
             existing_names = st.session_state.names
             if existing_names:
-                name_select = st.selectbox("スタッフ名（選択）", options=existing_names, index=0, key="app_name_select")
+                name_select = st.selectbox("スタッフ名（選択）", options=existing_names, index=0, key="reg_name_select")
                 st.caption("未登録の場合は下で新規入力")
             else:
                 name_select = ""
                 st.info("登録済みの名前がありません。下で新規入力してください。")
-            name_new = st.text_input("スタッフ名（新規入力）", key="app_name_text").strip()
+            name_new = st.text_input("スタッフ名（新規入力）", key="reg_name_text").strip()
             name = name_new or name_select
         with c2:
-            d = st.date_input("日付", value=date.today(), key="app_date")
-        with c3:
-            pass
+            d = st.date_input("日付", value=date.today(), key="reg_date")
 
+        st.markdown("#### and st（新規 / 既存 / LINE）")
         coln1, coln2, coln3 = st.columns(3)
-        with coln1: new_cnt = st.number_input("新規（件）", min_value=0, step=1, value=0, key="new_cnt")
-        with coln2: exist_cnt = st.number_input("既存（件）", min_value=0, step=1, value=0, key="exist_cnt")
-        with coln3: line_cnt = st.number_input("LINE（件）", min_value=0, step=1, value=0, key="line_cnt")
+        with coln1: new_cnt = st.number_input("新規（件）", min_value=0, step=1, value=0, key="reg_new")
+        with coln2: exist_cnt = st.number_input("既存（件）", min_value=0, step=1, value=0, key="reg_exist")
+        with coln3: line_cnt = st.number_input("LINE（件）", min_value=0, step=1, value=0, key="reg_line")
+
+        st.markdown("#### アンケート")
+        survey_cnt = st.number_input("アンケート（件）", min_value=0, step=1, value=0, key="reg_survey")
 
         submitted = st.form_submit_button("保存")
         if submitted:
             if not name:
                 st.warning("名前を入力してください。")
             else:
-                total_cnt = int(new_cnt) + int(exist_cnt) + int(line_cnt)
                 try:
-                    if total_cnt == 0:
-                        # 僅新增名字
+                    # and st
+                    if int(new_cnt) > 0:   insert_or_update_record(ymd(d), name, "new",   int(new_cnt))
+                    if int(exist_cnt) > 0: insert_or_update_record(ymd(d), name, "exist", int(exist_cnt))
+                    if int(line_cnt)  > 0: insert_or_update_record(ymd(d), name, "line",  int(line_cnt))
+                    # アンケート
+                    if int(survey_cnt) > 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+
+                    # 若全 0，僅註冊姓名
+                    if sum([int(new_cnt), int(exist_cnt), int(line_cnt), int(survey_cnt)]) == 0:
                         st.session_state.names = sorted(set(st.session_state.names) | {name})
                         st.success("名前を登録しました。（データは追加していません）")
                     else:
-                        # 分別寫入
-                        if new_cnt > 0:   insert_or_update_record(ymd(d), name, "new",   int(new_cnt))
-                        if exist_cnt > 0: insert_or_update_record(ymd(d), name, "exist", int(exist_cnt))
-                        if line_cnt > 0:  insert_or_update_record(ymd(d), name, "line",  int(line_cnt))
-
                         load_all_records_cached.clear()
                         st.session_state.data = load_all_records_cached()
                         st.session_state.names = names_from_records(st.session_state.data)
@@ -459,63 +461,22 @@ with tab1:
         st.caption("アンケート")
         render_rate_block("survey", "アンケート", survey_total, survey_target, ym)
 
-    render_refresh_button("refresh_app_tab")
+    render_refresh_button("refresh_reg_tab")
 
 # -----------------------------
-# 件数 アンケート
-# -----------------------------
-with tab2:
-    st.subheader("件数 アンケート")
-    with st.form("survey_form"):
-        c1, c2 = st.columns([2, 2])
-        with c1:
-            existing_names2 = st.session_state.names
-            if existing_names2:
-                name_select2 = st.selectbox("スタッフ名（選択）", options=existing_names2, index=0, key="survey_name_select")
-                st.caption("未登録の場合は下で新規入力")
-            else:
-                name_select2 = ""
-                st.info("登録済みの名前がありません。下で新規入力してください。")
-            name_new2 = st.text_input("スタッフ名（新規入力）", key="survey_name_text").strip()
-            name2 = name_new2 or name_select2
-        with c2:
-            d2 = st.date_input("日付", value=date.today(), key="survey_date")
-
-        cnt = st.number_input("アンケート（件）", min_value=0, step=1, value=0, key="survey_cnt")
-        submitted2 = st.form_submit_button("保存")
-        if submitted2:
-            if not name2:
-                st.warning("名前を入力してください。")
-            else:
-                try:
-                    if int(cnt) == 0:
-                        st.session_state.names = sorted(set(st.session_state.names) | {name2})
-                        st.success("名前を登録しました。（データは追加していません）")
-                    else:
-                        insert_or_update_record(ymd(d2), name2, "survey", int(cnt))
-                        load_all_records_cached.clear()
-                        st.session_state.data = load_all_records_cached()
-                        st.session_state.names = names_from_records(st.session_state.data)
-                        st.success("保存しました。")
-                except Exception as e:
-                    st.error(f"保存失敗: {e}")
-
-    render_refresh_button("refresh_survey_tab")
-
-# -----------------------------
-# and st 分析
+# and st 分析（保持原樣式）
 # -----------------------------
 with tab3:
     show_statistics("app", "and st")
 
 # -----------------------------
-# アンケート分析
+# アンケート分析（保持原樣式）
 # -----------------------------
 with tab4:
     show_statistics("survey", "アンケート")
 
 # -----------------------------
-# データ管理
+# データ管理（保持原樣式）
 # -----------------------------
 with tab5:
     try:
