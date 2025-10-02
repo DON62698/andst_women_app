@@ -471,5 +471,117 @@ def set_target(month: str, category: str, target: int) -> None:
         local = st.session_state.get("_local_targets", {})
         local[(month, category)] = int(target)
         st.session_state["_local_targets"] = local
+      # =============================
+# 刪除紀錄（供 data_management.py 呼叫）
+# =============================
+def delete_record(date_str: str, name: str, typ: str, count: int | None = None) -> bool:
+    """
+    刪除一筆記錄。
+    以 (date, name, type) 為主要比對鍵；若提供 count 則一併比對。
+    找到第一筆符合的列就刪除。成功回傳 True，否則 False。
+    """
+    # 先算 ISO 週（本機模式可能會顯示用）
+    _ = _iso_week_of(date_str)
+
+    if not _backend_available:
+        # --- 本機 fallback ---
+        recs = st.session_state.get("_local_records", [])
+        for i, row in enumerate(recs):
+            if (
+                row.get("date") == date_str and
+                row.get("name") == name and
+                row.get("type") == typ and
+                (count is None or int(row.get("count", 0)) == int(count))
+            ):
+                recs.pop(i)
+                st.session_state["_local_records"] = recs
+                return True
+        return False
+
+    # --- Google Sheets 後端 ---
+    cl, bk = _client_and_book()
+    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
+    if ws is None:
+        # 失敗時，退回本機刪
+        recs = st.session_state.get("_local_records", [])
+        for i, row in enumerate(recs):
+            if (
+                row.get("date") == date_str and
+                row.get("name") == name and
+                row.get("type") == typ and
+                (count is None or int(row.get("count", 0)) == int(count))
+            ):
+                recs.pop(i)
+                st.session_state["_local_records"] = recs
+                return True
+        return False
+
+    try:
+        values = ws.get_all_values()
+        if not values or len(values) <= 1:
+            return False
+
+        header = [c.strip() for c in values[0]]
+        idx = {
+            "date": header.index("date") if "date" in header else -1,
+            "name": header.index("name") if "name" in header else -1,
+            "type": header.index("type") if "type" in header else -1,
+            "count": header.index("count") if "count" in header else -1,
+        }
+
+        # 從第 2 列開始找
+        target_row_index = -1  # 1-based
+        for i in range(1, len(values)):
+            r = values[i]
+            d_ok = (idx["date"]  >= 0 and idx["date"]  < len(r) and r[idx["date"]].strip()  == date_str)
+            n_ok = (idx["name"]  >= 0 and idx["name"]  < len(r) and r[idx["name"]].strip()  == name)
+            t_ok = (idx["type"]  >= 0 and idx["type"]  < len(r) and r[idx["type"]].strip()  == typ)
+            if not (d_ok and n_ok and t_ok):
+                continue
+            if count is not None:
+                try:
+                    cval = int(r[idx["count"]]) if (idx["count"] >= 0 and idx["count"] < len(r)) else 0
+                except Exception:
+                    cval = 0
+                if cval != int(count):
+                    continue
+            target_row_index = i + 1  # 1-based
+            break
+
+        if target_row_index > 1:
+            ws.delete_rows(target_row_index)
+            return True
+
+        return False
+
+    except Exception:
+        # 最後防線：不要讓整個前端掛掉
+        return False
+
+
+# （可選）安全清空資料：保留標題列
+def clear_records_but_keep_header() -> bool:
+    """
+    清空 records 內容，但保留第 1 列標題與分頁本身。
+    成功回傳 True。
+    """
+    if not _backend_available:
+        st.session_state["_local_records"] = []
+        return True
+
+    cl, bk = _client_and_book()
+    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
+    if ws is None:
+        st.session_state["_local_records"] = []
+        return True
+
+    try:
+        last_row = ws.row_count
+        if last_row > 1:
+            ws.batch_clear([f"A2:Z{last_row}"])
+        return True
+    except Exception:
+        return False
+
 
 
