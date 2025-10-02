@@ -1,587 +1,381 @@
-# -*- coding: utf-8 -*-
-"""
-db_gsheets.py
-與 Streamlit 主程式相容的 Google Sheets 後端。
-- 若無金鑰/網路錯誤 => 自動啟用本機 fallback（session_state）
-- 主要工作表：
-  1) records: ["date","week","name","type","count"]
-  2) targets: ["month","category","target"]
-"""
-
-from __future__ import annotations
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
-import streamlit as st
-
-# 後端相依（允許缺少）
-_GSPREAD_OK = True
+# Streamlit is optional here (only used to read st.secrets if available)
 try:
-    import gspread
-    from gspread.exceptions import WorksheetNotFound, APIError as _GSpreadAPIError
-    from oauth2client.service_account import ServiceAccountCredentials
-except Exception:
-    _GSPREAD_OK = False
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # type: ignore
 
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# =========================================================
-# 常數
-# =========================================================
-RECORDS_SHEET = "records"
-TARGETS_SHEET = "targets"
+# ====== Configuration ======
+# Prefer reading from Streamlit secrets
+SHEET_URL_DEFAULT = "https://docs.google.com/spreadsheets/d/1dRMaH6G1bLzv-Bt1q5wEnZPC4ZylMCE7Dzcj1KAwURE/edit?usp=sharing"
 
-RECORDS_HEADER = ["date", "week", "name", "type", "count"]
-TARGETS_HEADER = ["month", "category", "target"]
-
-# gspread 權限範圍
-_SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-
-
-# =========================================================
-# 模組內部快取
-# =========================================================
-_client = None
-_book = None
-_backend_available = False  # True = 使用 GSheets；False = 使用本機 fallback
-
-
-# =========================================================
-# 工具：安全讀 secrets
-# =========================================================
-def _read_secrets() -> Tuple[Optional[dict], Optional[str]]:
-    """從 st.secrets 取得金鑰與 spreadsheet URL；缺少則回傳 (None, None)。"""
-    creds_dict = None
-    sheet_url = None
-    try:
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-        if "sheets" in st.secrets and "url" in st.secrets["sheets"]:
-            sheet_url = str(st.secrets["sheets"]["url"]).strip()
-    except Exception:
-        pass
-    return creds_dict, sheet_url
-
-
-# =========================================================
-# 工具：Client / Book
-# =========================================================
-def _client_and_book() -> Tuple[Optional[object], Optional[object]]:
-    """建立 gspread client 並開啟 spreadsheet。失敗則回傳 (None, None)。"""
-    global _client, _book
-    if _client is not None and _book is not None:
-        return _client, _book
-
-    if not _GSPREAD_OK:
-        return None, None
-
-    creds_dict, sheet_url = _read_secrets()
-    if not creds_dict or not sheet_url:
-        return None, None
-
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, _SCOPE)
-        _client = gspread.authorize(creds)
-        _book = _client.open_by_url(sheet_url)
-        return _client, _book
-    except Exception:
-        return None, None
-
-
-# =========================================================
-# 工具：安全的 ensure_worksheet
-# =========================================================
-def _ensure_worksheet(sh, name: str, header: List[str]):
+def _get_creds_dict() -> dict:
     """
-    回傳一個保證存在且 A1=header 的試算表分頁。
-    - 缺就新建
-    - 標題列不對就回填
-    - 任何錯誤盡量吸收，避免讓前端掛掉
+    Load Google Service Account JSON credentials.
+    Priority:
+      1) st.secrets["gcp_service_account"] (Streamlit Cloud recommended)
+      2) JSON string in env GOOGLE_SERVICE_ACCOUNT_JSON
+      3) JSON file path in env GOOGLE_APPLICATION_CREDENTIALS
     """
-    if sh is None:
+    # 1) Streamlit secrets
+    if st is not None:
+        try:
+            return dict(st.secrets["gcp_service_account"])  # type: ignore
+        except Exception:
+            pass
+
+    # 2) Env JSON string
+    js = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if js:
+        import json
+        return json.loads(js)
+
+    # 3) Env file path
+    path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if path and os.path.exists(path):
+        import json
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    raise RuntimeError("Google Service Account credentials not found. Set st.secrets['gcp_service_account'] or env GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_APPLICATION_CREDENTIALS.")
+
+def _get_sheet_url() -> str:
+    if st is not None:
+        try:
+            return st.secrets.get("sheet_url", SHEET_URL_DEFAULT)  # type: ignore
+        except Exception:
+            pass
+    return os.getenv("SHEET_URL", SHEET_URL_DEFAULT)
+
+def _get_client() -> gspread.Client:
+    creds_dict = _get_creds_dict()
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
+
+def _open_workbook():
+    client = _get_client()
+    return client.open_by_url(_get_sheet_url())
+
+def _ensure_worksheet(sh, title: str, header: list) -> gspread.Worksheet:
+    try:
+        ws = sh.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows="1000", cols=str(max(10, len(header))))
+        ws.append_row(header)
+    # If first row is empty or not header, ensure header exists
+    first_row = ws.row_values(1)
+    if not first_row:
+        ws.update("A1", [header])
+    return ws
+
+# ====== Public API (drop-in replacement for db.py) ======
+
+def init_db():
+    """Ensure worksheets exist with headers. Mirrors sqlite init."""
+    sh = _open_workbook()
+    _ensure_worksheet(sh, "records", ["date", "week", "name", "type", "count"])
+    _ensure_worksheet(sh, "targets", ["month", "type", "target"])
+
+def init_target_table():
+    """Kept for compatibility; targets sheet is created in init_db."""
+    init_db()
+
+def _week_str(date_str: str) -> str:
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    return f"{dt.isocalendar().week}w"
+
+def load_all_records() -> List[Dict[str, Any]]:
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "records", ["date", "week", "name", "type", "count"])
+    rows = ws.get_all_records()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if not r.get("date"):
+            continue
+        item = {
+            "date": r.get("date"),
+            "week": r.get("week") or _week_str(r.get("date")),
+            "name": r.get("name", ""),
+            "type": r.get("type", ""),
+            "count": int(r.get("count") or 0),
+        }
+        out.append(item)
+    return out
+
+def _find_row(ws: gspread.Worksheet, date_str: str, name: str, category: str) -> Optional[int]:
+    """Return row index (1-based) for first match below header, else None."""
+    # naive scan
+    all_values = ws.get_all_values()
+    if not all_values:
         return None
+    for idx, row in enumerate(all_values[1:], start=2):
+        d, w, n, t, c = (row + ["", "", "", "", ""])[:5]
+        if d == date_str and n == name and t == category:
+            return idx
+    return None
 
+def insert_or_update_record(date_str: str, name: str, category: str, count: int):
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "records", ["date", "week", "name", "type", "count"])
+    row_idx = _find_row(ws, date_str, name, category)
+    week = _week_str(date_str)
+    if row_idx:
+        ws.update(f"A{row_idx}:E{row_idx}", [[date_str, week, name, category, int(count)]])
+    else:
+        ws.append_row([date_str, week, name, category, int(count)])
+
+def delete_record(date_str: str, name: str, category: str) -> bool:
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "records", ["date", "week", "name", "type", "count"])
+    row_idx = _find_row(ws, date_str, name, category)
+    if row_idx:
+        ws.delete_rows(row_idx)
+        return True
+    return False
+
+def set_target(month: str, category: str, value: int):
+    """
+    Upsert into targets sheet.
+    month: "2025-08" (YYYY-MM)
+    category: "app" or "survey"
+    """
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "targets", ["month", "type", "target"])
+    # scan for existing
+    all_values = ws.get_all_values()
+    found = None
+    for idx, row in enumerate(all_values[1:], start=2):
+        m, t, v = (row + ["", "", ""])[:3]
+        if m == month and t == category:
+            found = idx
+            break
+    if found:
+        ws.update(f"A{found}:C{found}", [[month, category, int(value)]])
+    else:
+        ws.append_row([month, category, int(value)])
+
+def get_target(month: str, category: str) -> int:
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "targets", ["month", "type", "target"])
+    rows = ws.get_all_records()
+    for r in rows:
+        if r.get("month") == month and r.get("type") == category:
+            try:
+                return int(r.get("target") or 0)
+            except Exception:
+                return 0
+    return 0
+
+
+# ==== Cached Google Sheets client & workbook (added by assistant) ====
+
+def _get_sheet_url():
+    """Resolve sheet URL from Streamlit secrets, env var, or fallback default."""
+    if st is not None:
+        try:
+            return st.secrets["sheets"]["url"]
+        except Exception:
+            pass
+    return os.environ.get("SHEET_URL", SHEET_URL_DEFAULT)
+
+# Guard decorator for non-Streamlit contexts
+if st is not None:
+    @st.cache_resource
+    def _client_and_book():
+        import json
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        if st is not None:
+            creds_dict = dict(st.secrets["gcp_service_account"])  # type: ignore
+        else:
+            creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+            if not creds_json:
+                raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON env var for service account credentials.")
+            creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sh = client.open_by_url(_get_sheet_url())
+        return client, sh
+else:
+    def _client_and_book():
+        import json
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not creds_json:
+            raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON env var for service account credentials.")
+        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sh = client.open_by_url(_get_sheet_url())
+        return client, sh
+
+def _open_workbook():
+    """Return cached Spreadsheet handle (overrides any previous definition)."""
+    return _client_and_book()[1]
+# ==== End cached block ====
+
+
+# ==== Safe override for _ensure_worksheet (added by assistant) ====
+from gspread.exceptions import WorksheetNotFound, APIError as _GSpreadAPIError
+
+def _ensure_worksheet(sh, name: str, header):
+    """Return a worksheet with the given header ensured.
+    - Creates the sheet if missing.
+    - If reading header fails due to APIError, proceeds to set header.
+    """
     try:
         try:
             ws = sh.worksheet(name)
         except WorksheetNotFound:
-            # 建立分頁（至少 26 欄，避免更新範圍不足）
             ws = sh.add_worksheet(title=name, rows=1000, cols=max(26, len(header)))
-            try:
-                ws.update("A1", [header])
-            except Exception:
-                pass
-            return ws
 
-        # 嘗試讀第一列；若 APIError 當空列處理
+        # Try to read the first row; if it fails, treat as empty
         try:
             first_row = ws.row_values(1)
+        except _GSpreadAPIError:
+            first_row = []
+
+        # Normalize and check header
+        normalized = [str(c).strip() for c in (first_row or [])]
+        if normalized != header:
+            # Compute end column (A..Z); header size in this app <= 5, so this is fine
+            end_col = chr(64 + len(header))  # 1->A, 2->B, ...
+            ws.update(f"A1:{end_col}1", [header])
+        return ws
+    except Exception as e:
+        raise RuntimeError(f"_ensure_worksheet('{name}') failed: {e}")
+# ==== End safe override ====
+# ==== Cached Google Sheets client & workbook (assistant patch) ====
+def _get_sheet_url():
+    """Resolve sheet URL from Streamlit secrets, env var, or fallback default."""
+    if st is not None:
+        try:
+            return st.secrets["sheets"]["url"]
         except Exception:
+            pass
+    return os.environ.get("SHEET_URL", SHEET_URL_DEFAULT)
+
+if st is not None:
+    @st.cache_resource
+    def _client_and_book():
+        import json
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sh = client.open_by_url(_get_sheet_url())
+        return client, sh
+else:
+    def _client_and_book():
+        import json
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not creds_json:
+            raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON env var for service account credentials.")
+        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sh = client.open_by_url(_get_sheet_url())
+        return client, sh
+
+def _open_workbook():
+    """Return cached Spreadsheet handle (overrides any previous definition)."""
+    return _client_and_book()[1]
+# ==== End cached block ====
+
+
+# ==== Safe override for _ensure_worksheet (assistant patch) ====
+from gspread.exceptions import WorksheetNotFound, APIError as _GSpreadAPIError
+
+def _ensure_worksheet(sh, name: str, header):
+    """Return a worksheet with the given header ensured.
+    - Creates the sheet if missing.
+    - If reading header fails due to APIError, proceeds to set header.
+    """
+    try:
+        try:
+            ws = sh.worksheet(name)
+        except WorksheetNotFound:
+            ws = sh.add_worksheet(title=name, rows=1000, cols=max(26, len(header)))
+
+        # Try to read the first row; if it fails, treat as empty
+        try:
+            first_row = ws.row_values(1)
+        except _GSpreadAPIError:
             first_row = []
 
         normalized = [str(c).strip() for c in (first_row or [])]
-        if normalized[:len(header)] != header:
-            # 確保欄數足夠
-            try:
-                if ws.col_count < len(header):
-                    ws.resize(rows=max(ws.row_count, 1000), cols=max(26, len(header)))
-            except Exception:
-                pass
-            # 計算 A..Z.. 的結尾欄（header 長度 <= 26）
-            try:
-                end_col = chr(64 + min(len(header), 26))  # 1->A, 2->B ... 26->Z
-                ws.update(f"A1:{end_col}1", [header])
-            except Exception:
-                try:
-                    ws.update("A1", [header])
-                except Exception:
-                    pass
-
+        if normalized != header:
+            end_col = chr(64 + len(header))  # 1->A, 2->B, ...
+            ws.update(f"A1:{end_col}1", [header])
         return ws
-
-    except Exception:
-        # 最保守 fallback：再試一次取舊的；不 raise，讓前端以本機模式續跑
-        try:
-            ws = sh.worksheet(name)
-            return ws
-        except Exception:
-            try:
-                ws = sh.add_worksheet(title=name, rows=1000, cols=max(26, len(header)))
-                try:
-                    ws.update("A1", [header])
-                except Exception:
-                    pass
-                return ws
-            except Exception:
-                return None
-
-
-# =========================================================
-# 初始化 / 表頭建立
-# =========================================================
-def init_db() -> None:
-    """初始化後端；若失敗則切換本機 fallback。"""
-    global _backend_available
-    cl, bk = _client_and_book()
-    if cl and bk:
-        # 先嘗試建立/修復兩張工作表
-        _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
-        _ensure_worksheet(bk, TARGETS_SHEET, TARGETS_HEADER)
-        _backend_available = True
-        st.session_state["_backend_error"] = ""  # 清空舊錯
-    else:
-        _backend_available = False
-        st.session_state.setdefault("_backend_error", "Sheets backend not available; local mode enabled.")
-
-    # 初始化本機 fallback 結構
-    st.session_state.setdefault("_local_records", [])   # list[dict]
-    st.session_state.setdefault("_local_targets", {})   # {(month, category): target}
-
-
-def init_target_table() -> None:
-    """確保 targets 表存在（雖然 init_db 已處理，這裡保險再呼叫一次）。"""
-    cl, bk = _client_and_book()
-    if not (_backend_available and cl and bk):
-        return
-    _ensure_worksheet(bk, TARGETS_SHEET, TARGETS_HEADER)
-
-
-# =========================================================
-# 讀取 / 寫入：records
-# =========================================================
-def load_all_records() -> List[Dict]:
-    """
-    回傳所有紀錄為 list[dict]:
-    { "date": "YYYY-MM-DD", "week": int, "name": str, "type": "new|exist|line|survey", "count": int }
-    """
-    if not _backend_available:
-        # 本機 fallback
-        return list(st.session_state.get("_local_records", []))
-
-    cl, bk = _client_and_book()
-    if not (cl and bk):
-        # 失去連線時 fallback
-        return list(st.session_state.get("_local_records", []))
-
-    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
-    if ws is None:
-        return list(st.session_state.get("_local_records", []))
-
-    try:
-        values = ws.get_all_values()
     except Exception as e:
-        st.session_state["_backend_error"] = f"read records failed: {e}"
-        return list(st.session_state.get("_local_records", []))
-
-    if not values or len(values) <= 1:
-        return []
-
-    header = [c.strip() for c in values[0]]
-    rows = values[1:]
-
-    idx = {k: header.index(k) if k in header else -1 for k in RECORDS_HEADER}
-
-    out: List[Dict] = []
-    for r in rows:
-        try:
-            d = (r[idx["date"]].strip() if idx["date"] >= 0 and idx["date"] < len(r) else "")
-            nm = (r[idx["name"]].strip() if idx["name"] >= 0 and idx["name"] < len(r) else "")
-            tp = (r[idx["type"]].strip() if idx["type"] >= 0 and idx["type"] < len(r) else "")
-            cnt_raw = (r[idx["count"]].strip() if idx["count"] >= 0 and idx["count"] < len(r) else "0")
-            try:
-                cnt = int(cnt_raw)
-            except Exception:
-                cnt = 0
-
-            # week 欄位若不存在則即時計算
-            if idx["week"] >= 0 and idx["week"] < len(r) and r[idx["week"]].strip():
-                try:
-                    wk = int(r[idx["week"]])
-                except Exception:
-                    wk = _iso_week_of(d)
-            else:
-                wk = _iso_week_of(d)
-
-            if not d or not nm or not tp:
-                continue
-
-            out.append({
-                "date": d, "week": wk, "name": nm, "type": tp, "count": cnt
-            })
-        except Exception:
-            continue
-
-    return out
+        raise RuntimeError(f"_ensure_worksheet('{name}') failed: {e}")
+# ==== End safe override ====
 
 
-def _iso_week_of(date_str: str) -> int:
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-        return int(dt.isocalendar().week)
-    except Exception:
-        return 0
-
-
-def insert_or_update_record(date_str: str, name: str, typ: str, count: int) -> None:
-    """
-    以 (date, name, type) 為 key：
-    - 若已存在 => 將 count「加總」到既有值
-    - 若不存在 => 直接 append
-    """
-    # 先算 ISO 週
-    week_num = _iso_week_of(date_str)
-
-    if not _backend_available:
-        # 本機 fallback：以 list 模擬
-        recs = st.session_state.get("_local_records", [])
-        # 尋找是否存在
-        for row in recs:
-            if row["date"] == date_str and row["name"] == name and row["type"] == typ:
-                row["count"] = int(row.get("count", 0)) + int(count)
-                st.session_state["_local_records"] = recs
-                return
-        # 新增
-        recs.append({"date": date_str, "week": week_num, "name": name, "type": typ, "count": int(count)})
-        st.session_state["_local_records"] = recs
-        return
-
-    cl, bk = _client_and_book()
-    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
-    if ws is None:
-        # 退回本機
-        insert_or_update_record_local(date_str, name, typ, count, week_num)
-        return
-
-    try:
-        values = ws.get_all_values()
-        header = values[0] if values else RECORDS_HEADER
-        # 建立欄位索引
-        idx = {k: header.index(k) if k in header else -1 for k in RECORDS_HEADER}
-
-        # 找現有列（簡單掃描）
-        target_row_index = -1
-        for i in range(1, len(values)):
-            r = values[i]
-            d_ok = (idx["date"] >= 0 and idx["date"] < len(r) and r[idx["date"]].strip() == date_str)
-            n_ok = (idx["name"] >= 0 and idx["name"] < len(r) and r[idx["name"]].strip() == name)
-            t_ok = (idx["type"] >= 0 and idx["type"] < len(r) and r[idx["type"]].strip() == typ)
-            if d_ok and n_ok and t_ok:
-                target_row_index = i + 1  # 1-based row number
-                break
-
-        if target_row_index > 0:
-            # 讀舊 count
-            old_val = 0
-            try:
-                old_val_str = values[target_row_index - 1][idx["count"]]
-                old_val = int(old_val_str)
-            except Exception:
-                old_val = 0
-            new_val = old_val + int(count)
-
-            # 更新 count
-            cnt_col = idx["count"] + 1  # 1-based col
-            ws.update_cell(target_row_index, cnt_col, new_val)
-
-            # week 也補上
-            if idx["week"] >= 0:
-                ws.update_cell(target_row_index, idx["week"] + 1, week_num)
-            return
-        else:
-            # 直接 append：順序照 HEADER
-            row = ["", "", "", "", ""]
-            # date
-            if idx["date"] >= 0:
-                row[idx["date"]] = date_str
-            # week
-            if idx["week"] >= 0:
-                row[idx["week"]] = week_num
-            # name
-            if idx["name"] >= 0:
-                row[idx["name"]] = name
-            # type
-            if idx["type"] >= 0:
-                row[idx["type"]] = typ
-            # count
-            if idx["count"] >= 0:
-                row[idx["count"]] = int(count)
-
-            # 若 header 有缺欄，仍用 A..E 寫入
-            end_col = chr(64 + min(len(RECORDS_HEADER), 26))
-            ws.append_row(row[:len(RECORDS_HEADER)], value_input_option="RAW", table_range=f"A1:{end_col}1")
-            return
-
-    except Exception:
-        # 寫入失敗 -> 改寫入本機，避免整體流程中斷
-        insert_or_update_record_local(date_str, name, typ, count, week_num)
-
-
-def insert_or_update_record_local(date_str: str, name: str, typ: str, count: int, week_num: Optional[int] = None):
-    """本機 fallback 的寫入。"""
-    if week_num is None:
-        week_num = _iso_week_of(date_str)
-    recs = st.session_state.get("_local_records", [])
-    for row in recs:
-        if row["date"] == date_str and row["name"] == name and row["type"] == typ:
-            row["count"] = int(row.get("count", 0)) + int(count)
-            st.session_state["_local_records"] = recs
-            return
-    recs.append({"date": date_str, "week": week_num, "name": name, "type": typ, "count": int(count)})
-    st.session_state["_local_records"] = recs
-
-
-# =========================================================
-# 讀取 / 寫入：targets
-# =========================================================
+# ==== Robust get_target (assistant patch) ====
 def get_target(month: str, category: str) -> int:
     """
-    取得月目標；無則回 0。
-    month: "YYYY-MM"
-    category: "app" or "survey"
+    Robustly read a single target value.
+    - Prefer small-range reads over get_all_records() to reduce API load.
+    - Fallbacks gracefully and returns 0 on non-critical errors.
     """
-    if not _backend_available:
-        key = (month, category)
-        return int(st.session_state.get("_local_targets", {}).get(key, 0))
-
-    cl, bk = _client_and_book()
-    ws = _ensure_worksheet(bk, TARGETS_SHEET, TARGETS_HEADER)
-    if ws is None:
-        # fallback
-        key = (month, category)
-        return int(st.session_state.get("_local_targets", {}).get(key, 0))
-
+    sh = _open_workbook()
+    ws = _ensure_worksheet(sh, "targets", ["month", "type", "target"])
+    # Fast path
     try:
-        values = ws.get_all_values()
-        if not values or len(values) <= 1:
-            return 0
-
-        header = [c.strip() for c in values[0]]
-        idx_m = header.index("month") if "month" in header else -1
-        idx_c = header.index("category") if "category" in header else -1
-        idx_t = header.index("target") if "target" in header else -1
-
-        for i in range(1, len(values)):
-            r = values[i]
-            m_ok = (idx_m >= 0 and idx_m < len(r) and r[idx_m].strip() == month)
-            c_ok = (idx_c >= 0 and idx_c < len(r) and r[idx_c].strip() == category)
-            if m_ok and c_ok:
+        rows = ws.get_all_records()
+        for r in rows:
+            if r.get("month") == month and r.get("type") == category:
                 try:
-                    return int(r[idx_t]) if (idx_t >= 0 and idx_t < len(r)) else 0
+                    return int(r.get("target") or 0)
                 except Exception:
                     return 0
+    except Exception:
+        pass
+
+    # Fallback: bounded range
+    try:
+        data = ws.get("A1:C1000") or []
+    except Exception:
         return 0
 
-    except Exception:
-        key = (month, category)
-        return int(st.session_state.get("_local_targets", {}).get(key, 0))
+    if not data:
+        return 0
 
+    header = [str(x).strip().lower() for x in (data[0] if data else [])]
+    def _idx(name, default):
+        return header.index(name) if name in header else default
+    im, it, iv = _idx("month", 0), _idx("type", 1), _idx("target", 2)
 
-def set_target(month: str, category: str, target: int) -> None:
-    """
-    設定/覆寫月目標（有則更新、無則新增）
-    """
-    if not _backend_available:
-        local = st.session_state.get("_local_targets", {})
-        local[(month, category)] = int(target)
-        st.session_state["_local_targets"] = local
-        return
-
-    cl, bk = _client_and_book()
-    ws = _ensure_worksheet(bk, TARGETS_SHEET, TARGETS_HEADER)
-    if ws is None:
-        local = st.session_state.get("_local_targets", {})
-        local[(month, category)] = int(target)
-        st.session_state["_local_targets"] = local
-        return
-
-    try:
-        values = ws.get_all_values()
-        header = values[0] if values else TARGETS_HEADER
-        idx_m = header.index("month") if "month" in header else -1
-        idx_c = header.index("category") if "category" in header else -1
-        idx_t = header.index("target") if "target" in header else -1
-
-        # 尋找既有列
-        row_to_update = -1
-        for i in range(1, len(values)):
-            r = values[i]
-            m_ok = (idx_m >= 0 and idx_m < len(r) and r[idx_m].strip() == month)
-            c_ok = (idx_c >= 0 and idx_c < len(r) and r[idx_c].strip() == category)
-            if m_ok and c_ok:
-                row_to_update = i + 1
-                break
-
-        if row_to_update > 0:
-            # 直接更新 target 欄
-            ws.update_cell(row_to_update, idx_t + 1, int(target))
-        else:
-            # 新增一列
-            row = ["", "", ""]
-            if idx_m >= 0: row[idx_m] = month
-            if idx_c >= 0: row[idx_c] = category
-            if idx_t >= 0: row[idx_t] = int(target)
-            end_col = chr(64 + min(len(TARGETS_HEADER), 26))
-            ws.append_row(row[:len(TARGETS_HEADER)], value_input_option="RAW", table_range=f"A1:{end_col}1")
-
-    except Exception:
-        # 失敗則寫入本機
-        local = st.session_state.get("_local_targets", {})
-        local[(month, category)] = int(target)
-        st.session_state["_local_targets"] = local
-      # =============================
-# 刪除紀錄（供 data_management.py 呼叫）
-# =============================
-def delete_record(date_str: str, name: str, typ: str, count: int | None = None) -> bool:
-    """
-    刪除一筆記錄。
-    以 (date, name, type) 為主要比對鍵；若提供 count 則一併比對。
-    找到第一筆符合的列就刪除。成功回傳 True，否則 False。
-    """
-    # 先算 ISO 週（本機模式可能會顯示用）
-    _ = _iso_week_of(date_str)
-
-    if not _backend_available:
-        # --- 本機 fallback ---
-        recs = st.session_state.get("_local_records", [])
-        for i, row in enumerate(recs):
-            if (
-                row.get("date") == date_str and
-                row.get("name") == name and
-                row.get("type") == typ and
-                (count is None or int(row.get("count", 0)) == int(count))
-            ):
-                recs.pop(i)
-                st.session_state["_local_records"] = recs
-                return True
-        return False
-
-    # --- Google Sheets 後端 ---
-    cl, bk = _client_and_book()
-    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
-    if ws is None:
-        # 失敗時，退回本機刪
-        recs = st.session_state.get("_local_records", [])
-        for i, row in enumerate(recs):
-            if (
-                row.get("date") == date_str and
-                row.get("name") == name and
-                row.get("type") == typ and
-                (count is None or int(row.get("count", 0)) == int(count))
-            ):
-                recs.pop(i)
-                st.session_state["_local_records"] = recs
-                return True
-        return False
-
-    try:
-        values = ws.get_all_values()
-        if not values or len(values) <= 1:
-            return False
-
-        header = [c.strip() for c in values[0]]
-        idx = {
-            "date": header.index("date") if "date" in header else -1,
-            "name": header.index("name") if "name" in header else -1,
-            "type": header.index("type") if "type" in header else -1,
-            "count": header.index("count") if "count" in header else -1,
-        }
-
-        # 從第 2 列開始找
-        target_row_index = -1  # 1-based
-        for i in range(1, len(values)):
-            r = values[i]
-            d_ok = (idx["date"]  >= 0 and idx["date"]  < len(r) and r[idx["date"]].strip()  == date_str)
-            n_ok = (idx["name"]  >= 0 and idx["name"]  < len(r) and r[idx["name"]].strip()  == name)
-            t_ok = (idx["type"]  >= 0 and idx["type"]  < len(r) and r[idx["type"]].strip()  == typ)
-            if not (d_ok and n_ok and t_ok):
-                continue
-            if count is not None:
-                try:
-                    cval = int(r[idx["count"]]) if (idx["count"] >= 0 and idx["count"] < len(r)) else 0
-                except Exception:
-                    cval = 0
-                if cval != int(count):
-                    continue
-            target_row_index = i + 1  # 1-based
-            break
-
-        if target_row_index > 1:
-            ws.delete_rows(target_row_index)
-            return True
-
-        return False
-
-    except Exception:
-        # 最後防線：不要讓整個前端掛掉
-        return False
-
-
-# （可選）安全清空資料：保留標題列
-def clear_records_but_keep_header() -> bool:
-    """
-    清空 records 內容，但保留第 1 列標題與分頁本身。
-    成功回傳 True。
-    """
-    if not _backend_available:
-        st.session_state["_local_records"] = []
-        return True
-
-    cl, bk = _client_and_book()
-    ws = _ensure_worksheet(bk, RECORDS_SHEET, RECORDS_HEADER)
-    if ws is None:
-        st.session_state["_local_records"] = []
-        return True
-
-    try:
-        last_row = ws.row_count
-        if last_row > 1:
-            ws.batch_clear([f"A2:Z{last_row}"])
-        return True
-    except Exception:
-        return False
-
+    for row in data[1:]:
+        if len(row) <= max(im, it, iv):
+            continue
+        if str(row[im]) == month and str(row[it]) == category:
+            try:
+                return int(row[iv])
+            except Exception:
+                return 0
+    return 0
+# ==== End robust get_target ====
 
 
