@@ -15,7 +15,7 @@ try:
 except Exception:
     pass
 
-st.title("and st 統計Team W’s")
+st.title("Team W’s")
 
 # -----------------------------
 # Japanese font (best-effort; 防止日文亂碼)
