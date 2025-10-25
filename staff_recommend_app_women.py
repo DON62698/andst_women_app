@@ -274,6 +274,58 @@ def show_statistics(category: str, label: str):
         st.caption(f"表示中：{yearW}年・{monthW}")
         st.dataframe(weekly[["w", "count"]].rename(columns={"count": "合計"}), use_container_width=True)
 
+    # === 新增：單週每日曲線圖（與男生版一致；英文字避免亂碼） ===
+    st.subheader("週別推移グラフ")
+    yearsD = year_options(df_all)
+    default_yearD = date.today().year if date.today().year in yearsD else yearsD[-1]
+    colDY, colDW = st.columns([1, 1])
+    with colDY:
+        yearD = st.selectbox("年（週別推移グラフ）", options=yearsD, index=yearsD.index(default_yearD), key=f"daily_year_{category}")
+
+    df_yearD = df_all[df_all["date"].dt.year == int(yearD)].copy()
+    if category == "app":
+        df_yearD = df_yearD[df_yearD["type"].isin(["new", "exist", "line"])]
+    else:
+        df_yearD = df_yearD[df_yearD["type"] == "survey"]
+
+    weeksD = sorted(set(df_yearD["date"].dropna().dt.isocalendar().week.astype(int).tolist()))
+    week_labels = [f"w{w}" for w in weeksD] or [f"w{date.today().isocalendar().week}"]
+    default_wlabel = f"w{date.today().isocalendar().week}"
+    if default_wlabel not in week_labels:
+        default_wlabel = week_labels[0]
+    with colDW:
+        sel_week_label = st.selectbox("週", options=week_labels, index=week_labels.index(default_wlabel), key=f"daily_week_{category}")
+
+    try:
+        sel_week_num = int(sel_week_label.lstrip("w"))
+    except Exception:
+        sel_week_num = date.today().isocalendar().week
+
+    df_week = df_yearD.copy()
+    df_week["iso_week"] = df_week["date"].dt.isocalendar().week.astype(int)
+    df_week = df_week[df_week["iso_week"] == sel_week_num].copy()
+    df_week["weekday"] = df_week["date"].dt.weekday  # 0=Mon..6=Sun
+
+    daily = df_week.groupby("weekday")["count"].sum().reindex(range(7), fill_value=0).reset_index()
+    daily["label"] = daily["weekday"].map({0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"})
+
+    fig = plt.figure()
+    plt.plot(daily["label"], daily["count"], marker="o")
+    # survey 用固定英文標題避免亂碼；and st 維持英文
+    if category == "survey":
+        plt.title(f"Survey Daily: {yearD} {sel_week_label}")
+    else:
+        plt.title(f"{label} Daily Totals: {yearD} {sel_week_label}")
+    plt.xlabel("")  # 依你的要求省略 "Day of Week" 文字
+    plt.ylabel("Count")
+    st.pyplot(fig, clear_figure=True)
+
+    # 明細表（英欄名）
+    st.dataframe(
+        daily[["label", "count"]].rename(columns={"label": "Day", "count": "Total"}),
+        use_container_width=True
+    )
+
     # --- 構成比（新規・既存・LINE）— App only；標籤用英文避免亂碼 ---
     if category == "app":
         st.subheader("構成比（新規・既存・LINE）")
@@ -483,4 +535,3 @@ with tab5:
         show_data_management()
     except Exception as e:
         st.error(f"データ管理画面の読み込みに失敗しました: {e}")
-
