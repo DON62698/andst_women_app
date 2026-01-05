@@ -101,6 +101,26 @@ def ensure_dataframe(records) -> pd.DataFrame:
             df[col] = None
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0).astype(int)
+
+    # ISO 週（跨年週用）：2025-12-29 は 2026-W01 のように ISO 年がずれることがある
+    try:
+        iso = df["date"].dt.isocalendar()
+        df["iso_year"] = iso["year"].astype("Int64")
+        df["iso_week"] = iso["week"].astype("Int64")
+    except Exception:
+        df["iso_year"] = pd.NA
+        df["iso_week"] = pd.NA
+
+    # 月別（公暦）：月次集計は date.year / date.month を使用（ISO の影響を受けない）
+    try:
+        df["cal_year"] = df["date"].dt.year.astype("Int64")
+        df["cal_month"] = df["date"].dt.month.astype("Int64")
+        df["year_month"] = df["date"].dt.strftime("%Y-%m")
+    except Exception:
+        df["cal_year"] = pd.NA
+        df["cal_month"] = pd.NA
+        df["year_month"] = None
+
     return df
 
 def month_filter(df: pd.DataFrame, ym: str) -> pd.DataFrame:
@@ -113,10 +133,22 @@ def names_from_records(records) -> list:
 
 # ---- Year / Week helpers ----
 def year_options(df: pd.DataFrame) -> list:
+    """公暦年（month / 年次集計用）"""
     if "date" not in df.columns or df["date"].isna().all():
         return [date.today().year]
     years = sorted(set(df["date"].dropna().dt.year.astype(int).tolist()))
     return years or [date.today().year]
+
+def iso_year_options(df: pd.DataFrame) -> list:
+    """ISO 週年（週次集計用：跨年週対応）"""
+    if "iso_year" in df.columns and not df["iso_year"].isna().all():
+        years = sorted(set(df["iso_year"].dropna().astype(int).tolist()))
+        return years or [date.today().isocalendar().year]
+    if "date" not in df.columns or df["date"].isna().all():
+        return [date.today().isocalendar().year]
+    iso = df["date"].dropna().dt.isocalendar()
+    years = sorted(set(iso["year"].astype(int).tolist()))
+    return years or [date.today().isocalendar().year]
 
 def _week_label(week_number: int) -> str:
     """直接用 ISO 週：例如 40 -> 'w40'"""
@@ -124,50 +156,75 @@ def _week_label(week_number: int) -> str:
 
 # ---- 期間選項 / 過濾（供分析頁用，維持你既有操作手感）----
 def _period_options(df: pd.DataFrame, mode: str, selected_year: int):
+    """期間選択用の options / default を返す（週は ISO 年で扱う）"""
     if "date" not in df.columns or df["date"].isna().all():
         today = date.today()
         if mode == "週（単週）":
             ww = today.isocalendar().week
-            return [f"w{ww}"], f"w{ww}"
+            return [f"w{ww:02d}"], f"w{ww:02d}"
         elif mode == "月（単月）":
-            dft = today.strftime("%Y-%m"); return [dft], dft
+            dft = today.strftime("%Y-%m")
+            return [dft], dft
         else:
             return [today.year], today.year
 
     dfx = df.dropna(subset=["date"]).copy()
+
     if mode == "週（単週）":
-        dyear = dfx[dfx["date"].dt.year == int(selected_year)]
-        weeks = sorted(set(dyear["date"].dt.isocalendar().week.astype(int).tolist()))
-        labels = [f"w{w}" for w in weeks] or [f"w{date.today().isocalendar().week}"]
-        default = f"w{date.today().isocalendar().week}"
-        if default not in labels: default = labels[0]
+        # ISO 年で絞る（跨年週対応）
+        if "iso_year" in dfx.columns and "iso_week" in dfx.columns:
+            dyear = dfx[dfx["iso_year"].astype(int) == int(selected_year)]
+            weeks = sorted(set(dyear["iso_week"].dropna().astype(int).tolist()))
+        else:
+            iso = dfx["date"].dt.isocalendar()
+            dyear = dfx[iso["year"].astype(int) == int(selected_year)]
+            weeks = sorted(set(iso.loc[dyear.index, "week"].astype(int).tolist()))
+
+        labels = [f"w{w:02d}" for w in weeks] or [f"w{date.today().isocalendar().week:02d}"]
+        default = f"w{date.today().isocalendar().week:02d}"
+        if default not in labels:
+            default = labels[0]
         return labels, default
+
     elif mode == "月（単月）":
         dyear = dfx[dfx["date"].dt.year == int(selected_year)]
         months = sorted(set(dyear["date"].dt.strftime("%Y-%m").tolist()))
-        if not months: months = [f"{selected_year}-01"]
+        if not months:
+            months = [f"{selected_year}-01"]
         default = date.today().strftime("%Y-%m") if date.today().year == int(selected_year) else months[-1]
-        if default not in months: default = months[0]
+        if default not in months:
+            default = months[0]
         return months, default
+
     else:  # 年
         ys = year_options(dfx)
         default = date.today().year if date.today().year in ys else ys[-1]
         return ys, default
 
 def _filter_by_period(df: pd.DataFrame, mode: str, value, selected_year: int) -> pd.DataFrame:
+    """期間フィルタ（週は ISO 年で扱う）"""
     if "date" not in df.columns or df["date"].isna().all():
         return df.iloc[0:0]
     dfx = df.dropna(subset=["date"]).copy()
+
     if mode == "週（単週）":
-        dyear = dfx[dfx["date"].dt.year == int(selected_year)]
         try:
-            want = int(str(value).lower().lstrip("w"))
+            want_week = int(str(value).lower().lstrip("w"))
         except Exception:
-            return dyear.iloc[0:0]
-        return dyear[dyear["date"].dt.isocalendar().week.astype(int).isin([want])]
+            return dfx.iloc[0:0]
+
+        if "iso_year" in dfx.columns and "iso_week" in dfx.columns:
+            dyear = dfx[dfx["iso_year"].astype(int) == int(selected_year)]
+            return dyear[dyear["iso_week"].astype(int) == int(want_week)]
+        else:
+            iso = dfx["date"].dt.isocalendar()
+            dyear = dfx[iso["year"].astype(int) == int(selected_year)]
+            return dyear[iso.loc[dyear.index, "week"].astype(int) == int(want_week)]
+
     elif mode == "月（単月）":
         dyear = dfx[dfx["date"].dt.year == int(selected_year)]
         return dyear[dyear["date"].dt.strftime("%Y-%m") == str(value)]
+
     else:
         return dfx[dfx["date"].dt.year == int(selected_year)]
 
@@ -235,7 +292,7 @@ def render_rate_block(category: str, label: str, current_total: int, target: int
                 st.error(f"保存失敗: {e}")
 
 # -----------------------------
-# 分析（沿用你熟悉的樣式）
+# Statistics page
 # -----------------------------
 def show_statistics(category: str, label: str):
     df_all = ensure_dataframe(st.session_state.data)
@@ -268,29 +325,39 @@ def show_statistics(category: str, label: str):
     if df_monthW.empty:
         st.info("この月のデータがありません。")
     else:
-        df_monthW["iso_week"] = df_monthW["date"].dt.isocalendar().week.astype(int)
-        weekly = df_monthW.groupby("iso_week")["count"].sum().reset_index().sort_values("iso_week")
-        weekly["w"] = weekly["iso_week"].map(_week_label)
-        st.caption(f"表示中：{yearW}年・{monthW}")
+        # ISO 年・ISO 週で集計（跨年週が月内に混ざるケースに対応）
+        if "iso_year" not in df_monthW.columns or "iso_week" not in df_monthW.columns:
+            iso = df_monthW["date"].dt.isocalendar()
+            df_monthW["iso_year"] = iso["year"].astype(int)
+            df_monthW["iso_week"] = iso["week"].astype(int)
+
+        weekly = (
+            df_monthW.groupby(["iso_year", "iso_week"])["count"]
+            .sum()
+            .reset_index()
+            .sort_values(["iso_year", "iso_week"])
+        )
+        weekly["w"] = weekly.apply(lambda r: f'{int(r["iso_year"])}-w{int(r["iso_week"]):02d}', axis=1)
+        st.caption(f"表示中：{monthW}（ISO週）")
         st.dataframe(weekly[["w", "count"]].rename(columns={"count": "合計"}), use_container_width=True)
 
     # === 新增：單週每日曲線圖（與男生版一致；英文字避免亂碼） ===
     st.subheader("週別推移グラフ")
-    yearsD = year_options(df_all)
-    default_yearD = date.today().year if date.today().year in yearsD else yearsD[-1]
+    yearsD = iso_year_options(df_all)
+    default_yearD = date.today().isocalendar().year if date.today().isocalendar().year in yearsD else yearsD[-1]
     colDY, colDW = st.columns([1, 1])
     with colDY:
         yearD = st.selectbox("年（週別推移グラフ）", options=yearsD, index=yearsD.index(default_yearD), key=f"daily_year_{category}")
 
-    df_yearD = df_all[df_all["date"].dt.year == int(yearD)].copy()
+    df_yearD = df_all[df_all["iso_year"].astype("Int64") == int(yearD)].copy()
     if category == "app":
         df_yearD = df_yearD[df_yearD["type"].isin(["new", "exist", "line"])]
     else:
         df_yearD = df_yearD[df_yearD["type"] == "survey"]
 
-    weeksD = sorted(set(df_yearD["date"].dropna().dt.isocalendar().week.astype(int).tolist()))
-    week_labels = [f"w{w}" for w in weeksD] or [f"w{date.today().isocalendar().week}"]
-    default_wlabel = f"w{date.today().isocalendar().week}"
+    weeksD = sorted(set(df_yearD["iso_week"].dropna().astype(int).tolist()))
+    week_labels = [f"w{w:02d}" for w in weeksD] or [f"w{date.today().isocalendar().week:02d}"]
+    default_wlabel = f"w{date.today().isocalendar().week:02d}"
     if default_wlabel not in week_labels:
         default_wlabel = week_labels[0]
     with colDW:
@@ -302,7 +369,7 @@ def show_statistics(category: str, label: str):
         sel_week_num = date.today().isocalendar().week
 
     df_week = df_yearD.copy()
-    df_week["iso_week"] = df_week["date"].dt.isocalendar().week.astype(int)
+    df_week["iso_week"] = df_week["iso_week"].astype(int)
     df_week = df_week[df_week["iso_week"] == sel_week_num].copy()
     df_week["weekday"] = df_week["date"].dt.weekday  # 0=Mon..6=Sun
 
@@ -330,8 +397,8 @@ def show_statistics(category: str, label: str):
     if category == "app":
         st.subheader("構成比（新規・既存・LINE）")
         colYc, colp1, colp2 = st.columns([1, 1, 2])
-        years = year_options(df_all)
-        default_year = date.today().year if date.today().year in years else years[-1]
+        years = iso_year_options(df_all)
+        default_year = date.today().isocalendar().year if date.today().isocalendar().year in years else years[-1]
         with colYc:
             year_sel = st.selectbox("年", options=years, index=years.index(default_year), key=f"comp_year_{category}")
         with colp1:
@@ -535,3 +602,4 @@ with tab5:
         show_data_management()
     except Exception as e:
         st.error(f"データ管理画面の読み込みに失敗しました: {e}")
+
