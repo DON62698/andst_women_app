@@ -115,7 +115,6 @@ def render_chart_theme_toggle(category: str):
     index = 0 if current == "dark" else 1
     choice = st.radio(label, options=options, index=index, horizontal=True, key=f"{key}_radio")
     st.session_state[key] = "dark" if choice == "Dark" else "light"
-    st.caption("Print を選ぶと、円グラフ・月別棒グラフ・週別推移グラフを白背景で表示できます。")
 
 
 def ensure_dataframe(records) -> pd.DataFrame:
@@ -416,7 +415,7 @@ def build_weekly_progress_df(df_month: pd.DataFrame, monthly_target: int, catego
 def show_statistics(category: str, label: str):
     df_all = ensure_dataframe(st.session_state.data)
 
-    render_section_title(label, "Dark SaaS dashboard")
+    render_section_title(label, "獲得数管理ツール")
     render_chart_theme_toggle(category)
     chart_theme = get_chart_theme(category)
 
