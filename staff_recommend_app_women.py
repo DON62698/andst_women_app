@@ -2,20 +2,25 @@
 import os
 from datetime import date
 import uuid
+import calendar
 
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
+from ui_theme_dark import apply_dark_theme, render_kpi_row, render_section_title
+from charts_dark import weekly_progress_chart
+
 # -----------------------------
 # Page config & title
 # -----------------------------
 try:
-    st.set_page_config(page_title="and st 統計Team W’s", page_icon="icon.png", layout="centered")
+    st.set_page_config(page_title="and st 統計Team W’s", page_icon="icon.png", layout="wide")
 except Exception:
     pass
 
 st.title("and st W’s")
+apply_dark_theme()
 
 # -----------------------------
 # Japanese font (best-effort; 防止日文亂碼)
@@ -53,7 +58,7 @@ except Exception:
 rcParams["axes.unicode_minus"] = False
 
 # -----------------------------
-# Backend（沿用你的模組）
+# Backend（reuse your modules）
 # -----------------------------
 from db_gsheets import (
     init_db,
@@ -94,15 +99,40 @@ def ymd(d: date) -> str:
 def current_year_month() -> str:
     return date.today().strftime("%Y-%m")
 
+def get_chart_theme_key(category: str) -> str:
+    return f"chart_theme_{category}"
+
+
+def get_chart_theme(category: str) -> str:
+    return st.session_state.get(get_chart_theme_key(category), "dark")
+
+
+def render_chart_theme_toggle(category: str):
+    key = get_chart_theme_key(category)
+    current = st.session_state.get(key, "dark")
+    label = "表示モード（Chart）"
+    options = ["Dark", "Print"]
+    index = 0 if current == "dark" else 1
+    choice = st.radio(label, options=options, index=index, horizontal=True, key=f"{key}_radio")
+    st.session_state[key] = "dark" if choice == "Dark" else "light"
+
+
 def ensure_dataframe(records) -> pd.DataFrame:
+    """
+    records: list[dict] with at least date, name, type, count
+    Adds:
+      - iso_year / iso_week  (ISO week-year / week)  ✅跨年週正解
+      - year_month           (calendar month)        ✅月別統計不受影響
+    """
     df = pd.DataFrame(records or [])
     for col in ["date", "name", "type", "count"]:
         if col not in df.columns:
             df[col] = None
+
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0).astype(int)
 
-    # ISO 週（跨年週用）：2025-12-29 は 2026-W01 のように ISO 年がずれることがある
+    # ISO week-year / week (跨年週対策：2025/12/29 は 2026-W01)
     try:
         iso = df["date"].dt.isocalendar()
         df["iso_year"] = iso["year"].astype("Int64")
@@ -111,14 +141,10 @@ def ensure_dataframe(records) -> pd.DataFrame:
         df["iso_year"] = pd.NA
         df["iso_week"] = pd.NA
 
-    # 月別（公暦）：月次集計は date.year / date.month を使用（ISO の影響を受けない）
+    # Calendar month/year for monthly charts
     try:
-        df["cal_year"] = df["date"].dt.year.astype("Int64")
-        df["cal_month"] = df["date"].dt.month.astype("Int64")
         df["year_month"] = df["date"].dt.strftime("%Y-%m")
     except Exception:
-        df["cal_year"] = pd.NA
-        df["cal_month"] = pd.NA
         df["year_month"] = None
 
     return df
@@ -131,16 +157,15 @@ def month_filter(df: pd.DataFrame, ym: str) -> pd.DataFrame:
 def names_from_records(records) -> list:
     return sorted({(r.get("name") or "").strip() for r in (records or []) if r.get("name")})
 
-# ---- Year / Week helpers ----
-def year_options(df: pd.DataFrame) -> list:
-    """公暦年（month / 年次集計用）"""
+def year_options_calendar(df: pd.DataFrame) -> list:
+    """公曆年（用在月別/年別顯示用）"""
     if "date" not in df.columns or df["date"].isna().all():
         return [date.today().year]
     years = sorted(set(df["date"].dropna().dt.year.astype(int).tolist()))
     return years or [date.today().year]
 
-def iso_year_options(df: pd.DataFrame) -> list:
-    """ISO 週年（週次集計用：跨年週対応）"""
+def year_options_iso(df: pd.DataFrame) -> list:
+    """ISO 週年（用在週別分析用：跨年週正確歸類）"""
     if "iso_year" in df.columns and not df["iso_year"].isna().all():
         years = sorted(set(df["iso_year"].dropna().astype(int).tolist()))
         return years or [date.today().isocalendar().year]
@@ -150,13 +175,13 @@ def iso_year_options(df: pd.DataFrame) -> list:
     years = sorted(set(iso["year"].astype(int).tolist()))
     return years or [date.today().isocalendar().year]
 
-def _week_label(week_number: int) -> str:
-    """直接用 ISO 週：例如 40 -> 'w40'"""
-    return f"w{int(week_number)}"
-
-# ---- 期間選項 / 過濾（供分析頁用，維持你既有操作手感）----
 def _period_options(df: pd.DataFrame, mode: str, selected_year: int):
-    """期間選択用の options / default を返す（週は ISO 年で扱う）"""
+    """
+    期間選択:
+      - 週（単週）: ISO 年で扱う ✅
+      - 月（単月）: 公曆年月
+      - 年（単年）: 公曆年（表示・月別集計の整合）
+    """
     if "date" not in df.columns or df["date"].isna().all():
         today = date.today()
         if mode == "週（単週）":
@@ -171,7 +196,6 @@ def _period_options(df: pd.DataFrame, mode: str, selected_year: int):
     dfx = df.dropna(subset=["date"]).copy()
 
     if mode == "週（単週）":
-        # ISO 年で絞る（跨年週対応）
         if "iso_year" in dfx.columns and "iso_week" in dfx.columns:
             dyear = dfx[dfx["iso_year"].astype(int) == int(selected_year)]
             weeks = sorted(set(dyear["iso_week"].dropna().astype(int).tolist()))
@@ -196,13 +220,13 @@ def _period_options(df: pd.DataFrame, mode: str, selected_year: int):
             default = months[0]
         return months, default
 
-    else:  # 年
-        ys = year_options(dfx)
+    else:  # 年（公曆）
+        ys = year_options_calendar(dfx)
         default = date.today().year if date.today().year in ys else ys[-1]
         return ys, default
 
 def _filter_by_period(df: pd.DataFrame, mode: str, value, selected_year: int) -> pd.DataFrame:
-    """期間フィルタ（週は ISO 年で扱う）"""
+    """週（単週）は ISO 年で扱う ✅"""
     if "date" not in df.columns or df["date"].isna().all():
         return df.iloc[0:0]
     dfx = df.dropna(subset=["date"]).copy()
@@ -216,16 +240,16 @@ def _filter_by_period(df: pd.DataFrame, mode: str, value, selected_year: int) ->
         if "iso_year" in dfx.columns and "iso_week" in dfx.columns:
             dyear = dfx[dfx["iso_year"].astype(int) == int(selected_year)]
             return dyear[dyear["iso_week"].astype(int) == int(want_week)]
-        else:
-            iso = dfx["date"].dt.isocalendar()
-            dyear = dfx[iso["year"].astype(int) == int(selected_year)]
-            return dyear[iso.loc[dyear.index, "week"].astype(int) == int(want_week)]
+
+        iso = dfx["date"].dt.isocalendar()
+        dyear = dfx[iso["year"].astype(int) == int(selected_year)]
+        return dyear[iso.loc[dyear.index, "week"].astype(int) == int(want_week)]
 
     elif mode == "月（単月）":
         dyear = dfx[dfx["date"].dt.year == int(selected_year)]
         return dyear[dyear["date"].dt.strftime("%Y-%m") == str(value)]
 
-    else:
+    else:  # 年（公曆）
         return dfx[dfx["date"].dt.year == int(selected_year)]
 
 # -----------------------------
@@ -249,13 +273,9 @@ def render_refresh_button(btn_key: str = "refresh_btn"):
             st.rerun()
 
 # -----------------------------
-# 能量條達成率（第一頁用）
+# Rate block（能量條達成率）
 # -----------------------------
 def render_rate_block(category: str, label: str, current_total: int, target: int, ym: str):
-    """
-    以能量條呈現達成率，右側可設定月目標。
-    category: "app" 或 "survey"
-    """
     pct = 0 if target <= 0 else min(100.0, round(current_total * 100.0 / max(1, target), 1))
     bar_id = f"meter_{category}_{uuid.uuid4().hex[:6]}"
 
@@ -283,10 +303,6 @@ def render_rate_block(category: str, label: str, current_total: int, target: int
         if st.button("保存", key=f"target_save_{category}"):
             try:
                 set_target(ym, "app" if category == "app" else "survey", int(new_target))
-                try:
-                    get_target_safe.clear()  # 若不存在可忽略
-                except Exception:
-                    pass
                 st.success("保存しました。")
             except Exception as e:
                 st.error(f"保存失敗: {e}")
@@ -294,20 +310,127 @@ def render_rate_block(category: str, label: str, current_total: int, target: int
 # -----------------------------
 # Statistics page
 # -----------------------------
+def week_count_in_month(ym: str) -> int:
+    try:
+        y, m = [int(x) for x in str(ym).split("-")]
+        first = pd.Timestamp(year=y, month=m, day=1)
+        last = first + pd.offsets.MonthEnd(1)
+        days = pd.date_range(first, last, freq="D")
+        return max(1, int(days.isocalendar()["week"].nunique()))
+    except Exception:
+        return 4
+
+
+def weeks_touching_month(df: pd.DataFrame, ym: str) -> list[tuple[int, int]]:
+    if df.empty or "date" not in df.columns:
+        return []
+    dfx = df.dropna(subset=["date"]).copy()
+    if dfx.empty:
+        return []
+    month_rows = dfx[dfx["date"].dt.strftime("%Y-%m") == str(ym)].copy()
+    if month_rows.empty:
+        return []
+    if "iso_year" not in month_rows.columns or "iso_week" not in month_rows.columns:
+        iso = month_rows["date"].dt.isocalendar()
+        month_rows["iso_year"] = iso["year"].astype(int)
+        month_rows["iso_week"] = iso["week"].astype(int)
+    pairs = (
+        month_rows[["iso_year", "iso_week"]]
+        .dropna()
+        .astype(int)
+        .drop_duplicates()
+        .sort_values(["iso_year", "iso_week"])
+    )
+    return [tuple(x) for x in pairs[["iso_year", "iso_week"]].itertuples(index=False, name=None)]
+
+
+def week_label(iso_year: int, iso_week: int) -> str:
+    return f"{int(iso_year)}-w{int(iso_week):02d}"
+
+
+def previous_iso_week(iso_year: int, iso_week: int) -> tuple[int, int]:
+    try:
+        monday = date.fromisocalendar(int(iso_year), int(iso_week), 1)
+        py, pw, _ = (monday - pd.Timedelta(days=7)).isocalendar()
+        return int(py), int(pw)
+    except Exception:
+        return int(iso_year), max(1, int(iso_week) - 1)
+
+
+def get_full_week_df(df: pd.DataFrame, iso_year: int, iso_week: int, category: str) -> pd.DataFrame:
+    if df.empty:
+        return df.iloc[0:0].copy()
+    dfx = df.copy()
+    if "iso_year" not in dfx.columns or "iso_week" not in dfx.columns:
+        iso = dfx["date"].dt.isocalendar()
+        dfx["iso_year"] = iso["year"].astype(int)
+        dfx["iso_week"] = iso["week"].astype(int)
+    dfx = dfx[(dfx["iso_year"].astype(int) == int(iso_year)) & (dfx["iso_week"].astype(int) == int(iso_week))].copy()
+    if category == "app":
+        return dfx[dfx["type"].isin(["new", "exist", "line"])]
+    return dfx[dfx["type"] == "survey"]
+
+
+def get_week_total(df: pd.DataFrame, iso_year: int, iso_week: int, category: str) -> int:
+    dfx = get_full_week_df(df, iso_year, iso_week, category)
+    return int(dfx["count"].sum()) if not dfx.empty else 0
+
+
+def get_week_range_label(iso_year: int, iso_week: int) -> str:
+    try:
+        start = date.fromisocalendar(int(iso_year), int(iso_week), 1)
+        end = date.fromisocalendar(int(iso_year), int(iso_week), 7)
+        return f"{start.strftime('%m/%d')} - {end.strftime('%m/%d')}"
+    except Exception:
+        return ""
+
+def build_weekly_progress_df(df_month: pd.DataFrame, monthly_target: int, category: str) -> pd.DataFrame:
+    if df_month.empty:
+        return pd.DataFrame(columns=["week_label", "new", "exist", "line", "survey", "total", "target", "progress_rate"])
+
+    dfx = df_month.copy()
+    if "iso_year" not in dfx.columns or "iso_week" not in dfx.columns:
+        iso = dfx["date"].dt.isocalendar()
+        dfx["iso_year"] = iso["year"].astype(int)
+        dfx["iso_week"] = iso["week"].astype(int)
+
+    grouped = dfx.groupby(["iso_year", "iso_week", "type"])["count"].sum().unstack(fill_value=0).reset_index()
+    for col in ["new", "exist", "line", "survey"]:
+        if col not in grouped.columns:
+            grouped[col] = 0
+
+    if category == "app":
+        grouped["total"] = grouped[["new", "exist", "line"]].sum(axis=1)
+    else:
+        grouped["total"] = grouped[["survey"]].sum(axis=1)
+
+    grouped = grouped.sort_values(["iso_year", "iso_week"]).reset_index(drop=True)
+    grouped["week_label"] = grouped["iso_week"].astype(int).apply(lambda x: f"Week {x}")
+    weeks_n = max(1, len(grouped.index))
+    weekly_target = (monthly_target / weeks_n) if monthly_target > 0 else 0
+    grouped["target"] = weekly_target
+    grouped["progress_rate"] = grouped["total"].apply(lambda x: round((x / weekly_target) * 100, 1) if weekly_target > 0 else 0)
+    return grouped[["week_label", "new", "exist", "line", "survey", "total", "target", "progress_rate"]]
+
 def show_statistics(category: str, label: str):
     df_all = ensure_dataframe(st.session_state.data)
-    ym = current_year_month()
 
-    # --- 週別合計（ISO 週 w40 樣式）---
+    render_section_title(label, "獲得数管理ツール")
+    render_chart_theme_toggle(category)
+    chart_theme = get_chart_theme(category)
+
+    # --- 週別合計（選月→該月按 ISO 週分組；label 會顯示 ISO 年） ---
     st.subheader("週別合計")
-    yearsW = year_options(df_all)
+    yearsW = year_options_calendar(df_all)
     default_yearW = date.today().year if date.today().year in yearsW else yearsW[-1]
-    colY, colM = st.columns(2)
+    colY, colM, colW = st.columns([1, 1, 1])
     with colY:
         yearW = st.selectbox("年（週集計）", options=yearsW, index=yearsW.index(default_yearW), key=f"weekly_year_{category}")
+
     months_in_year = sorted(set(
         df_all[df_all["date"].dt.year == int(yearW)]["date"].dt.strftime("%Y-%m").dropna().tolist()
     )) or [f"{yearW}-{str(date.today().month).zfill(2)}"]
+
     default_monthW = (
         date.today().strftime("%Y-%m")
         if (date.today().year == int(yearW) and date.today().strftime("%Y-%m") in months_in_year)
@@ -316,16 +439,56 @@ def show_statistics(category: str, label: str):
     with colM:
         monthW = st.selectbox("月", options=months_in_year, index=months_in_year.index(default_monthW), key=f"weekly_month_{category}")
 
+    week_pairs = weeks_touching_month(df_all, monthW)
+    week_options = [week_label(y, w) for y, w in week_pairs]
+    today_iso = date.today().isocalendar()
+    current_week_label = week_label(int(today_iso.year), int(today_iso.week))
+    default_week_label = current_week_label if current_week_label in week_options else (week_options[-1] if week_options else current_week_label)
+    with colW:
+        selected_week_label = st.selectbox(
+            "週",
+            options=week_options or [default_week_label],
+            index=(week_options or [default_week_label]).index(default_week_label),
+            key=f"weekly_focus_week_{category}",
+        )
+
+    try:
+        selected_week_year = int(str(selected_week_label).split("-w")[0])
+        selected_week_num = int(str(selected_week_label).split("-w")[1])
+    except Exception:
+        selected_week_year = int(today_iso.year)
+        selected_week_num = int(today_iso.week)
+
     df_monthW = df_all[df_all["date"].dt.strftime("%Y-%m") == monthW].copy()
     if category == "app":
         df_monthW = df_monthW[df_monthW["type"].isin(["new", "exist", "line"])]
     else:
         df_monthW = df_monthW[df_monthW["type"] == "survey"]
 
+    monthly_target = get_target_safe(monthW, category)
+    weekly_progress = build_weekly_progress_df(df_monthW, monthly_target, category)
+    month_total = int(weekly_progress["total"].sum()) if not weekly_progress.empty else 0
+    month_rate = round((month_total / monthly_target) * 100, 1) if monthly_target > 0 else 0
+
+    weekly_total = get_week_total(df_all, selected_week_year, selected_week_num, category)
+    prev_year, prev_week_num = previous_iso_week(selected_week_year, selected_week_num)
+    prev_total = get_week_total(df_all, prev_year, prev_week_num, category)
+    delta_value = weekly_total - prev_total
+    delta_pct = round(((weekly_total - prev_total) / prev_total) * 100, 1) if prev_total > 0 else (100.0 if weekly_total > 0 else 0.0)
+    week_range_text = get_week_range_label(selected_week_year, selected_week_num)
+
+    render_kpi_row([
+        ("月間累計", f"{month_total}", "件", None),
+        ("月間目標", f"{monthly_target}", "件", None),
+        ("遂行率", f"{month_rate}", "%", "月基準"),
+        (f"w{selected_week_num:02d}週累計", f"{weekly_total}", "件", f"前週 {prev_total}件 / {delta_value:+d}件 ({delta_pct:+.1f}%)"),
+    ])
+    if week_range_text:
+        st.caption(f"選択週: {selected_week_label} / {week_range_text}　※完整週ベースで集計")
+
     if df_monthW.empty:
         st.info("この月のデータがありません。")
     else:
-        # ISO 年・ISO 週で集計（跨年週が月内に混ざるケースに対応）
         if "iso_year" not in df_monthW.columns or "iso_week" not in df_monthW.columns:
             iso = df_monthW["date"].dt.isocalendar()
             df_monthW["iso_year"] = iso["year"].astype(int)
@@ -338,113 +501,128 @@ def show_statistics(category: str, label: str):
             .sort_values(["iso_year", "iso_week"])
         )
         weekly["w"] = weekly.apply(lambda r: f'{int(r["iso_year"])}-w{int(r["iso_week"]):02d}', axis=1)
+
         st.caption(f"表示中：{monthW}（ISO週）")
         st.dataframe(weekly[["w", "count"]].rename(columns={"count": "合計"}), use_container_width=True)
 
-    # === 新增：單週每日曲線圖（與男生版一致；英文字避免亂碼） ===
     st.subheader("週別推移グラフ")
-    yearsD = iso_year_options(df_all)
-    default_yearD = date.today().isocalendar().year if date.today().isocalendar().year in yearsD else yearsD[-1]
-    colDY, colDW = st.columns([1, 1])
-    with colDY:
-        yearD = st.selectbox("年（週別推移グラフ）", options=yearsD, index=yearsD.index(default_yearD), key=f"daily_year_{category}")
-
-    df_yearD = df_all[df_all["iso_year"].astype("Int64") == int(yearD)].copy()
-    if category == "app":
-        df_yearD = df_yearD[df_yearD["type"].isin(["new", "exist", "line"])]
+    if not weekly_progress.empty:
+        weekly_progress_chart(weekly_progress, category=category, theme=chart_theme)
     else:
-        df_yearD = df_yearD[df_yearD["type"] == "survey"]
+        st.info("表示できる週別データがありません。")
 
-    weeksD = sorted(set(df_yearD["iso_week"].dropna().astype(int).tolist()))
-    week_labels = [f"w{w:02d}" for w in weeksD] or [f"w{date.today().isocalendar().week:02d}"]
-    default_wlabel = f"w{date.today().isocalendar().week:02d}"
-    if default_wlabel not in week_labels:
-        default_wlabel = week_labels[0]
-    with colDW:
-        sel_week_label = st.selectbox("週", options=week_labels, index=week_labels.index(default_wlabel), key=f"daily_week_{category}")
-
-    try:
-        sel_week_num = int(sel_week_label.lstrip("w"))
-    except Exception:
-        sel_week_num = date.today().isocalendar().week
-
-    df_week = df_yearD.copy()
-    df_week["iso_week"] = df_week["iso_week"].astype(int)
-    df_week = df_week[df_week["iso_week"] == sel_week_num].copy()
-    df_week["weekday"] = df_week["date"].dt.weekday  # 0=Mon..6=Sun
+    # --- 週ごとの曜日別表（上の選択週に連動） ---
+    st.caption(f"曜日別明細：{selected_week_label}")
+    df_week = get_full_week_df(df_all, selected_week_year, selected_week_num, category).copy()
+    df_week["weekday"] = df_week["date"].dt.weekday if not df_week.empty else pd.Series(dtype=int)
 
     daily = df_week.groupby("weekday")["count"].sum().reindex(range(7), fill_value=0).reset_index()
     daily["label"] = daily["weekday"].map({0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"})
 
-    fig = plt.figure()
-    plt.plot(daily["label"], daily["count"], marker="o")
-    # survey 用固定英文標題避免亂碼；and st 維持英文
-    if category == "survey":
-        plt.title(f"Survey Daily: {yearD} {sel_week_label}")
-    else:
-        plt.title(f"{label} Daily Totals: {yearD} {sel_week_label}")
-    plt.xlabel("")  # 依你的要求省略 "Day of Week" 文字
-    plt.ylabel("Count")
-    st.pyplot(fig, clear_figure=True)
-
-    # 明細表（英欄名）
     st.dataframe(
         daily[["label", "count"]].rename(columns={"label": "Day", "count": "Total"}),
         use_container_width=True
     )
 
-    # --- 構成比（新規・既存・LINE）— App only；標籤用英文避免亂碼 ---
+    # --- 構成比（App only）: 週選択は ISO 年で ✅ ---
     if category == "app":
         st.subheader("構成比（新規・既存・LINE）")
         colYc, colp1, colp2 = st.columns([1, 1, 2])
-        years = iso_year_options(df_all)
+
+        years = year_options_iso(df_all)
         default_year = date.today().isocalendar().year if date.today().isocalendar().year in years else years[-1]
+
         with colYc:
             year_sel = st.selectbox("年", options=years, index=years.index(default_year), key=f"comp_year_{category}")
         with colp1:
             ptype = st.selectbox("対象期間", ["週（単週）", "月（単月）", "年（単年）"], key=f"comp_period_type_{category}")
         with colp2:
-            opts, default = _period_options(df_all, ptype, year_sel)
+            # 年（単年）/月（単月）時は公曆年的 year_sel 可能不直覺，但這裡主要用在週分析
+            opts, default = _period_options(df_all, ptype, int(year_sel))  # ✅選択した年に合わせて週/月/年の候補を生成
             idx = opts.index(default) if default in opts else 0
             sel = st.selectbox("表示する期間", options=opts, index=idx if len(opts) > 0 else 0, key=f"comp_period_value_{category}")
 
         df_comp_base = df_all[df_all["type"].isin(["new", "exist", "line"])].copy()
-        df_comp = _filter_by_period(df_comp_base, ptype, sel, year_sel)
-        new_sum  = int(df_comp[df_comp["type"] == "new"]["count"].sum())
-        exist_sum= int(df_comp[df_comp["type"] == "exist"]["count"].sum())
+        if ptype == "週（単週）":
+            df_comp = _filter_by_period(df_comp_base, ptype, sel, year_sel)
+            caption = f"表示中：{year_sel}年・{sel}"
+        elif ptype == "月（単月）":
+            df_comp = df_comp_base[df_comp_base["date"].dt.strftime("%Y-%m") == str(sel)]
+            caption = f"表示中：{sel}"
+        else:
+            # 年（単年）：公曆年
+            y_cal = int(str(sel))
+            df_comp = df_comp_base[df_comp_base["date"].dt.year == y_cal]
+            caption = f"表示中：{y_cal}年"
+
+        new_sum = int(df_comp[df_comp["type"] == "new"]["count"].sum())
+        exist_sum = int(df_comp[df_comp["type"] == "exist"]["count"].sum())
         line_sum = int(df_comp[df_comp["type"] == "line"]["count"].sum())
         total = new_sum + exist_sum + line_sum
 
         if total > 0:
-            st.caption(f"表示中：{year_sel}年" if ptype=="年（単年）" else f"表示中：{year_sel}年・{sel}")
-            plt.figure()
-            labels = ["new", "exist", "LINE"]  # 英文標籤，避免亂碼
-            plt.pie([new_sum, exist_sum, line_sum], labels=labels, autopct="%1.1f%%", startangle=90)
-            st.pyplot(plt.gcf())
+            st.caption(caption)
+            pie_bg = "#FFFFFF" if chart_theme == "light" else "#151A2D"
+            pie_fg = "#111827" if chart_theme == "light" else "#F3F4F6"
+            fig, ax = plt.subplots(figsize=(6, 4), facecolor=pie_bg)
+            ax.set_facecolor(pie_bg)
+            labels = ["New", "Existing", "LINE"]
+            colors = ["#3B82F6", "#F59E0B", "#22C55E"]
+            wedges, texts, autotexts = ax.pie(
+                [new_sum, exist_sum, line_sum],
+                labels=labels,
+                autopct="%1.1f%%",
+                startangle=90,
+                colors=colors,
+                textprops={"color": pie_fg, "fontsize": 10},
+                wedgeprops={"edgecolor": pie_bg, "linewidth": 1},
+            )
+            ax.set_title("Composition (New / Existing / LINE)", color=pie_fg)
+            for t in autotexts:
+                t.set_color(pie_fg)
+                t.set_fontsize(10)
+            fig.patch.set_facecolor(pie_bg)
+            st.pyplot(fig)
+            plt.close(fig)
         else:
             st.info("対象データがありません。")
 
-    # --- スタッフ別 合計（表格；頭名加👑）---
+    # --- スタッフ別 合計（週選択は ISO 年で ✅）---
     st.subheader("スタッフ別 合計")
     colYs, cpt1, cpt2 = st.columns([1, 1, 2])
-    years2 = year_options(df_all)
-    default_year2 = date.today().year if date.today().year in years2 else years2[-1]
+
+    years2 = year_options_iso(df_all)
+    default_year2 = date.today().isocalendar().year if date.today().isocalendar().year in years2 else years2[-1]
     with colYs:
         year_sel2 = st.selectbox("年", options=years2, index=years2.index(default_year2), key=f"staff_year_{category}")
     with cpt1:
         ptype2 = st.selectbox("対象期間", ["週（単週）", "月（単月）", "年（単年）"], key=f"staff_period_type_{category}", index=0)
     with cpt2:
+        # ✅ 選んだ「年」に応じて期間候補を作る（2025が出ない不具合の修正）
+        #   週（単週）: ISO 年で扱う
+        #   月（単月）: 公暦年で扱う
+        #   年（単年）: 公暦年（選択肢はデータから生成）
         opts2, default2 = _period_options(df_all, ptype2, year_sel2)
+
         idx2 = opts2.index(default2) if default2 in opts2 else 0
         sel2 = st.selectbox("表示する期間", options=opts2, index=idx2 if len(opts2) > 0 else 0, key=f"staff_period_value_{category}")
-    st.caption(f"（{year_sel2}年・{sel2 if ptype2!='年（単年）' else '年合計'}）")
 
     if category == "app":
         df_staff_base = df_all[df_all["type"].isin(["new", "exist", "line"])].copy()
     else:
         df_staff_base = df_all[df_all["type"] == "survey"].copy()
 
-    df_staff = _filter_by_period(df_staff_base, ptype2, sel2, year_sel2)
+    if ptype2 == "週（単週）":
+        df_staff = _filter_by_period(df_staff_base, ptype2, sel2, year_sel2)
+        st.caption(f"表示中：{year_sel2}年・{sel2}")
+    elif ptype2 == "月（単月）":
+        df_staff = df_staff_base[df_staff_base["date"].dt.strftime("%Y-%m") == str(sel2)]
+        st.caption(f"表示中：{sel2}")
+    else:
+        y_cal = int(str(sel2))
+        df_staff = df_staff_base[df_staff_base["date"].dt.year == y_cal]
+        st.caption(f"表示中：{y_cal}年")
+
     if df_staff.empty:
         st.info("対象データがありません。")
     else:
@@ -456,13 +634,13 @@ def show_statistics(category: str, label: str):
         )
         staff_sum.insert(0, "順位", staff_sum.index + 1)
         if len(staff_sum) > 0:
-            staff_sum.loc[0, "順位"] = f"{staff_sum.loc[0, '順位']} 👑"
+            staff_sum.loc[0, "順位"] = f'{staff_sum.loc[0, "順位"]} 👑'
         staff_sum = staff_sum.rename(columns={"name": "スタッフ", "count": "合計"})
         st.dataframe(staff_sum[["順位", "スタッフ", "合計"]], use_container_width=True)
 
-    # --- 月別累計（年次）---
+    # --- 月別累計（年次）：公曆年/月，不受 ISO 影響 ✅ ---
     st.subheader("月別累計（年次）")
-    years3 = year_options(df_all)
+    years3 = year_options_calendar(df_all)
     default_year3 = date.today().year if date.today().year in years3 else years3[-1]
     year_sel3 = st.selectbox("年を選択", options=years3, index=years3.index(default_year3), key=f"monthly_year_{category}")
 
@@ -476,7 +654,6 @@ def show_statistics(category: str, label: str):
     if df_year.empty:
         st.info("対象データがありません。")
     else:
-        import calendar
         monthly = (
             df_year.groupby(df_year["date"].dt.strftime("%Y-%m"))["count"]
             .sum()
@@ -485,25 +662,36 @@ def show_statistics(category: str, label: str):
         labels = [calendar.month_abbr[int(s.split("-")[1])] for s in monthly.index.tolist()]
         values = monthly.values.tolist()
 
-        plt.figure()
-        bars = plt.bar(labels, values)
-        plt.grid(True, axis="y", linestyle="--", linewidth=0.5)
-        plt.xticks(rotation=0, ha="center")
-        plt.title(f"{title_label} Monthly totals ({int(year_sel3)})")
+        bar_bg = "#FFFFFF" if chart_theme == "light" else "#151A2D"
+        bar_fg = "#111827" if chart_theme == "light" else "#F3F4F6"
+        grid_c = "#D1D5DB" if chart_theme == "light" else "#2A314D"
+        palette = ["#3B82F6", "#F59E0B", "#22C55E"]
+        fig, ax = plt.subplots(figsize=(8, 4.2), facecolor=bar_bg)
+        ax.set_facecolor(bar_bg)
+        bar_colors = [palette[i % len(palette)] for i in range(len(labels))]
+        bars = ax.bar(labels, values, color=bar_colors)
+        ax.grid(True, axis="y", linestyle="--", linewidth=0.5, color=grid_c)
+        ax.tick_params(axis="x", colors=bar_fg)
+        ax.tick_params(axis="y", colors=bar_fg)
+        ax.set_title(f"{title_label} Monthly totals ({int(year_sel3)})", color=bar_fg)
+        for spine in ax.spines.values():
+            spine.set_color(grid_c)
         ymax = max(values) if values else 0
         if ymax > 0:
-            plt.ylim(0, ymax * 1.15)
+            ax.set_ylim(0, ymax * 1.15)
         for bar, val in zip(bars, values):
-            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{int(val)}", ha="center", va="bottom", fontsize=9)
-        st.pyplot(plt.gcf())
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f"{int(val)}", ha="center", va="bottom", fontsize=9, color=bar_fg)
+        fig.patch.set_facecolor(bar_bg)
+        st.pyplot(fig)
+        plt.close(fig)
 
 # -----------------------------
-# Tabs（第一頁 = 合併的 件数登録；其他分頁不動）
+# Tabs
 # -----------------------------
 tab_reg, tab3, tab4, tab5 = st.tabs(["件数登録", "and st 分析", "アンケート分析", "データ管理"])
 
 # -----------------------------
-# 件数登録（and st + アンケート 合併頁）
+# 件数登録（and st + アンケート 合併）
 # -----------------------------
 with tab_reg:
     st.subheader("件数登録")
@@ -524,9 +712,12 @@ with tab_reg:
 
         st.markdown("#### and st（新規 / 既存 / LINE）")
         coln1, coln2, coln3 = st.columns(3)
-        with coln1: new_cnt = st.number_input("新規（件）", min_value=0, step=1, value=0, key="reg_new")
-        with coln2: exist_cnt = st.number_input("既存（件）", min_value=0, step=1, value=0, key="reg_exist")
-        with coln3: line_cnt = st.number_input("LINE（件）", min_value=0, step=1, value=0, key="reg_line")
+        with coln1:
+            new_cnt = st.number_input("新規（件）", min_value=0, step=1, value=0, key="reg_new")
+        with coln2:
+            exist_cnt = st.number_input("既存（件）", min_value=0, step=1, value=0, key="reg_exist")
+        with coln3:
+            line_cnt = st.number_input("LINE（件）", min_value=0, step=1, value=0, key="reg_line")
 
         st.markdown("#### アンケート")
         survey_cnt = st.number_input("アンケート（件）", min_value=0, step=1, value=0, key="reg_survey")
@@ -538,13 +729,18 @@ with tab_reg:
             else:
                 try:
                     # and st
-                    if int(new_cnt) > 0:   insert_or_update_record(ymd(d), name, "new",   int(new_cnt))
-                    if int(exist_cnt) > 0: insert_or_update_record(ymd(d), name, "exist", int(exist_cnt))
-                    if int(line_cnt)  > 0: insert_or_update_record(ymd(d), name, "line",  int(line_cnt))
-                    # アンケート
-                    if int(survey_cnt) > 0: insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+                    if int(new_cnt) > 0:
+                        insert_or_update_record(ymd(d), name, "new", int(new_cnt))
+                    if int(exist_cnt) > 0:
+                        insert_or_update_record(ymd(d), name, "exist", int(exist_cnt))
+                    if int(line_cnt) > 0:
+                        insert_or_update_record(ymd(d), name, "line", int(line_cnt))
 
-                    # 若全 0，僅註冊姓名
+                    # survey
+                    if int(survey_cnt) > 0:
+                        insert_or_update_record(ymd(d), name, "survey", int(survey_cnt))
+
+                    # if all 0, just register the name
                     if sum([int(new_cnt), int(exist_cnt), int(line_cnt), int(survey_cnt)]) == 0:
                         st.session_state.names = sorted(set(st.session_state.names) | {name})
                         st.success("名前を登録しました。（データは追加していません）")
@@ -556,12 +752,14 @@ with tab_reg:
                 except Exception as e:
                     st.error(f"保存失敗: {e}")
 
-    # === 達成率（能量條；and st / アンケート）===
+    # 達成率（能量條）
     df_all = ensure_dataframe(st.session_state.data)
     ym = current_year_month()
     df_m = month_filter(df_all, ym)
+
     app_total = int(df_m[df_m["type"].isin(["new", "exist", "line"])]["count"].sum())
     survey_total = int(df_m[df_m["type"] == "survey"]["count"].sum())
+
     try:
         app_target = get_target(ym, "app")
     except Exception:
@@ -583,23 +781,22 @@ with tab_reg:
     render_refresh_button("refresh_reg_tab")
 
 # -----------------------------
-# and st 分析（保持原樣式）
+# and st 分析
 # -----------------------------
 with tab3:
     show_statistics("app", "and st")
 
 # -----------------------------
-# アンケート分析（保持原樣式）
+# アンケート分析
 # -----------------------------
 with tab4:
     show_statistics("survey", "アンケート")
 
 # -----------------------------
-# データ管理（保持原樣式）
+# データ管理
 # -----------------------------
 with tab5:
     try:
         show_data_management()
     except Exception as e:
         st.error(f"データ管理画面の読み込みに失敗しました: {e}")
-
