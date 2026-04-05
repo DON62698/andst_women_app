@@ -633,7 +633,7 @@ def show_statistics(category: str, label: str):
             .sort_values("count", ascending=False)
             .reset_index(drop=True)
         )
-        staff_sum.insert(0, "順位", staff_sum.index + 1)
+        staff_sum.insert(0, "順位", (staff_sum.index + 1).astype(str))
         if len(staff_sum) > 0:
             staff_sum.loc[0, "順位"] = f'{staff_sum.loc[0, "順位"]} 👑'
         staff_sum = staff_sum.rename(columns={"name": "スタッフ", "count": "合計"})
