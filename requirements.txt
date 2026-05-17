@@ -4,3 +4,4 @@ matplotlib
 gspread
 oauth2client
 plotly
+google-auth

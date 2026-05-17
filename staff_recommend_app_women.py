@@ -6,7 +6,10 @@ import calendar
 
 import pandas as pd
 import streamlit as st
+import html
 import matplotlib.pyplot as plt
+import gspread
+from google.oauth2.service_account import Credentials
 
 from ui_theme_dark import apply_dark_theme, render_kpi_row, render_section_title
 from charts_dark import weekly_progress_chart
@@ -98,6 +101,77 @@ def ymd(d: date) -> str:
 
 def current_year_month() -> str:
     return date.today().strftime("%Y-%m")
+
+# -----------------------------
+# Refund attendance (Google Sheets)
+# -----------------------------
+@st.cache_resource
+def get_refund_attendance_ws():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=scopes,
+    )
+
+    gc = gspread.authorize(creds)
+
+    spreadsheet = gc.open("and_st_recommend")
+
+    try:
+        ws = spreadsheet.worksheet("refund_attendance")
+    except Exception:
+        ws = spreadsheet.add_worksheet(title="refund_attendance", rows=200, cols=10)
+        ws.append_row(["year", "staff", "attendance_days"])
+
+    return ws
+
+
+def load_refund_attendance():
+    try:
+        ws = get_refund_attendance_ws()
+        records = ws.get_all_records()
+
+        data = {}
+        for r in records:
+            year = str(r.get("year", "")).strip()
+            staff = str(r.get("staff", "")).strip()
+            days = int(r.get("attendance_days", 0))
+
+            if not year or not staff:
+                continue
+
+            if year not in data:
+                data[year] = {}
+
+            data[year][staff] = days
+
+        return data
+
+    except Exception:
+        return {}
+
+
+def save_refund_attendance(data):
+    ws = get_refund_attendance_ws()
+
+    ws.clear()
+    ws.append_row(["year", "staff", "attendance_days"])
+
+    rows = []
+
+    for year, staffs in data.items():
+        for staff, days in staffs.items():
+            rows.append([year, staff, int(days)])
+
+    if rows:
+        ws.append_rows(rows)
+
+
+
 
 def get_chart_theme_key(category: str) -> str:
     return f"chart_theme_{category}"
@@ -685,10 +759,303 @@ def show_statistics(category: str, label: str):
         st.pyplot(fig)
         plt.close(fig)
 
+def show_refund_event():
+    """5/13〜5/20 の and st 限定・臨時ランキング画面。"""
+    df_all = ensure_dataframe(st.session_state.data)
+
+    st.subheader("還元イベント")
+
+    # 年だけ選べるようにして、来年以降も同じ画面を使えるようにする
+    years = year_options_calendar(df_all)
+    this_year = date.today().year
+    if this_year not in years:
+        years = sorted(set(years + [this_year]))
+    default_year = this_year if this_year in years else years[-1]
+    event_year = st.selectbox(
+        "イベント年",
+        options=years,
+        index=years.index(default_year),
+        key="refund_event_year",
+    )
+
+    start_dt = pd.Timestamp(year=int(event_year), month=5, day=13)
+    end_dt = pd.Timestamp(year=int(event_year), month=5, day=20)
+
+    df_event = df_all[
+        (df_all["date"] >= start_dt)
+        & (df_all["date"] <= end_dt)
+        & (df_all["type"].isin(["new", "exist", "line"]))
+    ].copy()
+
+    st.markdown(f"#### 集計期間：{start_dt.strftime('%Y/%m/%d')} 〜 {end_dt.strftime('%Y/%m/%d')}")
+
+    if df_event.empty:
+        st.info("この期間の and st データがありません。")
+        return
+
+    # 日別×スタッフ別の and st 合計
+    daily_staff = (
+        df_event.groupby(["date", "name"], as_index=False)["count"]
+        .sum()
+        .rename(columns={"count": "daily_total"})
+    )
+
+    # 累計ランキング用
+    staff_total = (
+        df_event.groupby("name", as_index=False)["count"]
+        .sum()
+        .rename(columns={"count": "total"})
+        .sort_values(["total", "name"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+
+    staff_names = staff_total["name"].tolist()
+
+    st.markdown("### 出勤日数入力")
+
+    # 出勤日数をローカルJSONに保存して、再読み込み後も保持する
+    attendance_store = load_refund_attendance()
+    year_key = str(event_year)
+    if year_key not in attendance_store or not isinstance(attendance_store.get(year_key), dict):
+        attendance_store[year_key] = {}
+
+    attendance_days = {}
+    cols = st.columns(4)
+    for i, staff in enumerate(staff_names):
+        widget_key = f"refund_attendance_{event_year}_{staff}"
+        saved_value = int(attendance_store[year_key].get(staff, 0))
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = saved_value
+
+        with cols[i % 4]:
+            attendance_days[staff] = st.number_input(
+                f"{staff}",
+                min_value=0,
+                max_value=8,
+                step=1,
+                key=widget_key,
+            )
+
+    # 入力内容を毎回保存
+    attendance_store[year_key] = {staff: int(attendance_days.get(staff, 0)) for staff in staff_names}
+    try:
+        save_refund_attendance(attendance_store)
+    except Exception as e:
+        st.warning(f"出勤日数の保存に失敗しました：{e}")
+
+    ranking = staff_total.copy()
+    ranking["出勤日数"] = ranking["name"].map(attendance_days).fillna(0).astype(float)
+    ranking["AVG"] = ranking.apply(
+        lambda r: round(float(r["total"]) / float(r["出勤日数"]), 2) if float(r["出勤日数"]) > 0 else 0,
+        axis=1,
+    )
+
+    # 1. AVG
+    avg_rank = ranking.sort_values(["AVG", "total", "name"], ascending=[False, False, True]).reset_index(drop=True)
+    avg_winner = avg_rank.iloc[0]
+
+    # 2. 期間中の単日最多
+    max_daily_count = int(daily_staff["daily_total"].max())
+    max_daily_rows = daily_staff[daily_staff["daily_total"] == max_daily_count].copy()
+    max_daily_rows = max_daily_rows.sort_values(["date", "name"])
+    max_daily_names = "、".join(max_daily_rows["name"].astype(str).unique().tolist())
+
+    # 3. 累計最多
+    total_rank = ranking.sort_values(["total", "AVG", "name"], ascending=[False, False, True]).reset_index(drop=True)
+    total_winner = total_rank.iloc[0]
+
+    # 4. 単日最多達成回数（日ごとの1位。タイの場合は同点者全員に1回カウント）
+    max_by_day = daily_staff.groupby("date")["daily_total"].transform("max")
+    daily_winners = daily_staff[daily_staff["daily_total"] == max_by_day].copy()
+    win_counts = (
+        daily_winners.groupby("name", as_index=False)["date"]
+        .nunique()
+        .rename(columns={"date": "単日最多達成回数"})
+    )
+    win_rank = (
+        ranking[["name", "total", "AVG"]]
+        .merge(win_counts, on="name", how="left")
+        .fillna({"単日最多達成回数": 0})
+    )
+    win_rank["単日最多達成回数"] = win_rank["単日最多達成回数"].astype(int)
+    win_rank = win_rank.sort_values(["単日最多達成回数", "total", "AVG", "name"], ascending=[False, False, False, True]).reset_index(drop=True)
+    win_winner = win_rank.iloc[0]
+
+    # 全スタッフ合計
+    overall_total = int(df_event["count"].sum())
+
+    # 全体ダウンロード率：app（新規＋既存）/ and st総数（新規＋既存＋LINE）
+    app_total = int(df_event[df_event["type"].isin(["new", "exist"])]["count"].sum())
+    app_rate = round(app_total * 100.0 / overall_total, 1) if overall_total > 0 else 0.0
+
+    # 還元イベント専用カード：画像イメージに合わせたUI
+    refund_cards = [
+        ("全体累計", "全スタッフ", f"{overall_total}", "件"),
+        ("全体DL率", f"app {app_total}件", f"{app_rate:.1f}", "%"),
+        ("AVG 1位", str(avg_winner["name"]), f'{avg_winner["AVG"]:.2f}', f'累計 {int(avg_winner["total"])}件 / 出勤 {avg_winner["出勤日数"]:g}日'),
+        ("単日最多", max_daily_names, f"{max_daily_count}", "件"),
+        ("累計最多", str(total_winner["name"]), f'{int(total_winner["total"])}', "件"),
+        ("単日MVP", str(win_winner["name"]), f'{int(win_winner["単日最多達成回数"])}', "回"),
+    ]
+
+    st.markdown(
+        """
+        <style>
+        .refund-card {
+            background:
+                radial-gradient(circle at 20% 0%, rgba(34,197,94,0.10), transparent 32%),
+                linear-gradient(180deg, rgba(15,23,42,0.98) 0%, rgba(3,10,24,0.98) 100%);
+            border: 1px solid rgba(74, 96, 154, 0.62);
+            border-radius: 18px;
+            padding: 1.25rem 1.05rem 1.15rem 1.05rem;
+            min-height: 205px;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.24);
+        }
+        .refund-card-title {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            color: #86efac;
+            font-size: 0.95rem;
+            font-weight: 800;
+            letter-spacing: 0.02em;
+            margin-bottom: 1.35rem;
+            white-space: nowrap;
+        }
+        .refund-crown {
+            font-size: 1.35rem;
+            line-height: 1;
+            filter: drop-shadow(0 0 8px rgba(134,239,172,0.35));
+        }
+        .refund-staff {
+            color: #f8fafc;
+            font-size: 0.92rem;
+            font-weight: 700;
+            line-height: 1.25;
+            min-height: 1.6em;
+            margin-bottom: 1.25rem;
+            word-break: break-word;
+        }
+        .refund-number-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.42rem;
+            margin-bottom: 1.05rem;
+        }
+        .refund-number {
+            color: #7ee787;
+            font-size: 2.35rem;
+            font-weight: 900;
+            line-height: 0.95;
+            letter-spacing: 0.01em;
+            text-shadow: 0 0 14px rgba(126,231,135,0.22);
+        }
+        .refund-unit {
+            color: #e2e8f0;
+            font-size: 0.95rem;
+            font-weight: 800;
+            line-height: 1.4;
+            margin-bottom: 0.12rem;
+        }
+        .refund-sub {
+            color: #22d3ee;
+            font-size: 0.92rem;
+            font-weight: 800;
+            line-height: 1.25;
+            min-height: 1.2em;
+        }
+        @media (max-width: 900px) {
+            .refund-card { min-height: 180px; padding: 1.15rem; }
+            .refund-card-title { font-size: 0.95rem; }
+            .refund-staff { font-size: 1rem; }
+            .refund-number { font-size: 2.45rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    refund_cols = st.columns(len(refund_cards))
+    for col, (label, staff_name, main_value, sub) in zip(refund_cols, refund_cards):
+        with col:
+            unit_html = html.escape(sub) if sub in ["件", "回", "%"] else ""
+            sub_html = "" if sub in ["件", "回", "%"] else html.escape(sub)
+            st.markdown(
+                f"""
+                <div class="refund-card">
+                    <div class="refund-card-title"><span class="refund-crown">♛</span><span>{html.escape(label)}</span></div>
+                    <div class="refund-staff">{html.escape(staff_name)}</div>
+                    <div class="refund-number-row">
+                        <span class="refund-number">{html.escape(main_value)}</span>
+                        <span class="refund-unit">{unit_html}</span>
+                    </div>
+                    <div class="refund-sub">{sub_html}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("### 個人タイトル一覧")
+    title_table = pd.DataFrame([
+        {
+            "項目": "全体累計",
+            "スタッフ": "全スタッフ",
+            "数値": f"{overall_total}件",
+            "補足": "期間中のand st合計",
+        },
+        {
+            "項目": "全体DL率",
+            "スタッフ": "app",
+            "数値": f"{app_rate:.1f}%",
+            "補足": f"app {app_total}件 / 全体 {overall_total}件",
+        },
+        {
+            "項目": "AVG",
+            "スタッフ": avg_winner["name"],
+            "数値": f'{avg_winner["AVG"]:.2f}',
+            "補足": f'累計 {int(avg_winner["total"])}件 / 出勤 {avg_winner["出勤日数"]:g}日',
+        },
+        {
+            "項目": "期間中 単日最多",
+            "スタッフ": max_daily_names,
+            "数値": f"{max_daily_count}件",
+            "補足": " / ".join([f'{r["date"].strftime("%m/%d")} {r["name"]}' for _, r in max_daily_rows.iterrows()]),
+        },
+        {
+            "項目": "累計最多",
+            "スタッフ": total_winner["name"],
+            "数値": f'{int(total_winner["total"])}件',
+            "補足": "期間累計",
+        },
+        {
+            "項目": "単日MVP",
+            "スタッフ": win_winner["name"],
+            "数値": f'{int(win_winner["単日最多達成回数"])}回',
+            "補足": "日別1位の回数。同点の場合は全員カウント",
+        },
+    ])
+    st.dataframe(title_table, use_container_width=True, hide_index=True)
+
+    st.markdown("### スタッフ別 詳細")
+    detail = ranking.merge(win_counts, on="name", how="left").fillna({"単日最多達成回数": 0})
+    detail["単日最多達成回数"] = detail["単日最多達成回数"].astype(int)
+    detail = detail.sort_values(["total", "AVG", "単日最多達成回数", "name"], ascending=[False, False, False, True]).reset_index(drop=True)
+    detail.insert(0, "順位", detail.index + 1)
+    detail = detail.rename(columns={"name": "スタッフ", "total": "累計"})
+    detail_display = detail[["順位", "スタッフ", "累計", "出勤日数", "AVG", "単日最多達成回数"]].rename(columns={"単日最多達成回数": "単日MVP"})
+    st.dataframe(detail_display, use_container_width=True, hide_index=True)
+
+    st.markdown("### 日別スタッフ別 明細")
+    detail_daily = daily_staff.copy()
+    detail_daily["date"] = detail_daily["date"].dt.strftime("%m/%d")
+    detail_daily = detail_daily.rename(columns={"date": "日付", "name": "スタッフ", "daily_total": "and st 合計"})
+    st.dataframe(detail_daily.sort_values(["日付", "and st 合計", "スタッフ"], ascending=[True, False, True]), use_container_width=True, hide_index=True)
+
+
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_reg, tab3, tab4, tab5 = st.tabs(["件数登録", "and st 分析", "アンケート分析", "データ管理"])
+tab_reg, tab_event, tab3, tab4, tab5 = st.tabs(["件数登録", "還元イベント", "and st 分析", "アンケート分析", "データ管理"])
 
 # -----------------------------
 # 件数登録（and st + アンケート 合併）
@@ -779,6 +1146,12 @@ with tab_reg:
         render_rate_block("survey", "アンケート", survey_total, survey_target, ym)
 
     render_refresh_button("refresh_reg_tab")
+
+# -----------------------------
+# 還元イベント
+# -----------------------------
+with tab_event:
+    show_refund_event()
 
 # -----------------------------
 # and st 分析
